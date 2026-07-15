@@ -29,8 +29,7 @@ To create a desktop shortcut:
 
 ```powershell
 cd app-desktop
-.
-CreateDesktopShortcut.ps1
+npm run make-shortcut
 ```
 
 ## Reversibility
