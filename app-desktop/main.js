@@ -1,7 +1,7 @@
 const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const { spawn } = require('child_process');
+const { spawn, execSync } = require('child_process');
 
 function findWorkspaceRoot() {
   const explicitRoot = (process.env.CYGNUS_WORKSPACE_ROOT ?? '').trim();
@@ -63,22 +63,68 @@ function writeRuntimeConfig(config) {
   return RUNTIME_FILE;
 }
 
-function getWindowsNpmCommand(scriptName, extraEnv) {
+function getRunCommand(scriptName, extraEnv) {
   const env = {
     ...process.env,
     ...extraEnv,
   };
 
-  const command = [
-    'set PATH=C:\\Progra~1\\nodejs;%PATH%',
-    `C:\\Progra~1\\nodejs\\npm.cmd run ${scriptName}`,
-  ].join(' && ');
+  const npmCmdPath = resolveNpmCmd();
+  // Quoted because the resolved path almost always contains spaces
+  // ("Program Files"). This full string is handed to the shell as ONE line
+  // (via shell: true below) — do not split this into a separate args array
+  // for spawn(), that re-escapes the quotes already in this string and
+  // produces a literal `\"...\"` that cmd.exe can't parse.
+  const command = `"${npmCmdPath}" run ${scriptName}`;
 
-  return {
-    cmd: process.env.ComSpec || 'cmd.exe',
-    args: ['/c', command],
-    env,
-  };
+  return { command, env };
+}
+
+// Finds npm.cmd on THIS machine instead of assuming Node.js lives at
+// C:\Program Files\nodejs (only true if the installer defaults were used).
+// Order: 1) whatever `where` resolves via this process's own PATH — correct
+// on any machine where Node works normally from a terminal; 2) a short list
+// of well-known install locations, for the case where Electron (especially
+// when double-clicked or launched from a shortcut rather than a terminal)
+// inherited a stale/incomplete PATH; 3) throw a clear, actionable error
+// instead of spawning a command that's guaranteed to fail with a cryptic
+// "npm is not recognized" deep inside cmd.exe.
+let _npmCmdPath = null;
+function resolveNpmCmd() {
+  if (_npmCmdPath) return _npmCmdPath;
+
+  try {
+    const out = execSync('where npm.cmd', { encoding: 'utf8', windowsHide: true });
+    const first = out.split(/\r?\n/).map((s) => s.trim()).find(Boolean);
+    if (first && fs.existsSync(first)) {
+      _npmCmdPath = first;
+      return _npmCmdPath;
+    }
+  } catch {
+    // `where` found nothing on PATH in this process — fall through to the
+    // well-known-location check below.
+  }
+
+  const wellKnownDirs = [
+    process.env['ProgramFiles']       && path.join(process.env['ProgramFiles'], 'nodejs'),
+    process.env['ProgramFiles(x86)']  && path.join(process.env['ProgramFiles(x86)'], 'nodejs'),
+    process.env['LOCALAPPDATA']       && path.join(process.env['LOCALAPPDATA'], 'Programs', 'nodejs'),
+    process.env['APPDATA']            && path.join(process.env['APPDATA'], 'npm'),
+  ].filter(Boolean);
+
+  for (const dir of wellKnownDirs) {
+    const candidate = path.join(dir, 'npm.cmd');
+    if (fs.existsSync(candidate)) {
+      _npmCmdPath = candidate;
+      return _npmCmdPath;
+    }
+  }
+
+  throw new Error(
+    'Could not find npm on this machine (checked PATH and the usual Node.js ' +
+    'install locations). Make sure Node.js is installed, then close and ' +
+    'reopen this app.',
+  );
 }
 
 function runScript(scriptName, extraEnv = {}, stateLabel = scriptName) {
@@ -87,14 +133,24 @@ function runScript(scriptName, extraEnv = {}, stateLabel = scriptName) {
       reject(new Error('A run is already in progress.'));
       return;
     }
+
+    let run;
+    try {
+      run = getRunCommand(scriptName, extraEnv);
+    } catch (err) {
+      emitLog(`[desktop-runner] ${err.message}`);
+      reject(err);
+      return;
+    }
+
     isRunning = true;
     emitState(`Running: ${stateLabel}`);
 
-    const run = getWindowsNpmCommand(scriptName, extraEnv);
-    const child = spawn(run.cmd, run.args, {
+    const child = spawn(run.command, {
       cwd: WORKSPACE_ROOT,
       env: run.env,
       windowsHide: true,
+      shell: true,
     });
 
     child.stdout.on('data', (d) => emitLog(d.toString().replace(/\r?\n$/, '')));
