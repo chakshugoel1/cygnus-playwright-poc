@@ -1,0 +1,676 @@
+/**
+ * excel-compare.helpers.ts
+ *
+ * Streaming Excel workbook comparison, in three passes:
+ *
+ * Tier 1 — per-sheet ordered hash (fast path).
+ *   Stream both files' matching sheet, feeding each row into a running SHA-1.
+ *   If the two hashes match → sheet is byte-identical → done for that sheet.
+ *   A mismatch at Tier 1 proves nothing (could be mere row reordering) so always fall
+ *   through to Tier 2 on any mismatch.
+ *
+ * Tier 2 — visual-block-aware diff (the detailed pass).
+ *   report-export.helpers.ts writes each Power BI visual as a self-contained block:
+ *   a "[VISUAL] <title> [<type>]" marker row, a header row, its data rows, and a
+ *   blank spacer. This tier re-groups the row stream back into those blocks and
+ *   compares VISUAL TO VISUAL rather than treating the sheet as one flat bag of
+ *   rows. That buys three things a flat row-diff cannot:
+ *     - A table that simply moved to a different position/row range in the sheet
+ *       is still matched correctly, because matching is by visual identity
+ *       (title + type), not row position. A flat row-multiset already tolerated
+ *       *row* reordering; this additionally tolerates *visual* reordering and
+ *       keeps row matches scoped to the correct visual instead of letting two
+ *       coincidentally-identical rows from unrelated visuals cancel out.
+ *     - Header-text differences (e.g. an Import-mode friendly column name vs a
+ *       Direct-Lake raw column name) are reported separately from genuine value
+ *       differences, instead of being blended into one undifferentiated pile of
+ *       "only in expected / only in actual" rows.
+ *     - The same visual title appearing a different number of times on each side
+ *       (duplicate slicers, a visual that only exists on one side, two distinctly
+ *       different visuals that happen to share a title) is called out explicitly
+ *       instead of silently fragmenting into dozens of unexplained row diffs.
+ *
+ * `identical` (per sheet and per workbook) stays STRICT: every visual must match
+ * on title, type, count, headers AND data. `dataIdentical` is the relaxed sibling:
+ * true when every visual's underlying VALUES match, even if headers were renamed,
+ * columns were reordered, or a visual is duplicated identically on one side.
+ * Callers that want "position/renaming-tolerant" pass/fail should gate on
+ * `dataIdentical`; callers that want a byte-for-byte check should use `identical`.
+ *
+ * Design constraints (per implementation brief):
+ *   - Uses ExcelJS streaming reader only — never document-mode readFile()
+ *   - No new npm dependencies: exceljs (already installed) + Node built-in crypto
+ *   - Memory-safe: Tier 1 hashes rows and discards them immediately. Tier 2 holds
+ *     at most one visual's rows in memory at a time while parsing (not the whole
+ *     sheet), matching the memory profile the streaming writer already targets.
+ */
+
+import * as crypto from 'crypto';
+import * as path   from 'path';
+import ExcelJS     from 'exceljs';
+
+// ── Public types ─────────────────────────────────────────────────────────────
+
+export type VisualDiffStatus =
+  | 'identical'        // headers + data + counts all match
+  | 'header-diff'      // data matches; header text and/or column order differs
+  | 'duplicate-count'  // headers + data match; this visual appears a different
+                        // number of times on each side (all copies mutually identical)
+  | 'data-diff'        // matched 1:1 but the underlying values differ
+  | 'only-in-expected' // visual (by title+type) exists only in the source export
+  | 'only-in-actual'   // visual (by title+type) exists only in the target export
+  | 'ambiguous';        // more than one distinct variant on at least one side —
+                        // could not safely auto-pair, needs a human look
+
+export interface VisualBlockDiff {
+  title:          string;
+  type:           string;
+  status:         VisualDiffStatus;
+  /** How many blocks with this exact (title, type) were found on each side. */
+  countExpected:  number;
+  countActual:    number;
+  rowsExpected:   number;
+  rowsActual:     number;
+  headerExpected: string[];
+  headerActual:   string[];
+  /** Up to SAMPLE_SIZE data rows found only in the expected copy of this visual. */
+  sampleOnlyInExpected: string[][];
+  /** Up to SAMPLE_SIZE data rows found only in the actual copy of this visual. */
+  sampleOnlyInActual:   string[][];
+  /** True total (not capped by SAMPLE_SIZE) of differing rows, for data-diff visuals. */
+  onlyInExpectedCount:  number;
+  onlyInActualCount:    number;
+  /** Human-readable explanation — why this status, what to go check. */
+  note?: string;
+}
+
+export interface SheetDiffSummary {
+  sheet:         string;
+  inExpected:    boolean;
+  inActual:      boolean;
+  rowsExpected:  number;
+  rowsActual:    number;
+  /** STRICT: every visual matches on title, type, count, headers AND data. */
+  identical:     boolean;
+  /** RELAXED: every visual's underlying data matches (headers/order/duplicate
+   *  count differences do not count against this). Use this to gate pass/fail
+   *  when you only care that the migrated report shows the same numbers. */
+  dataIdentical: boolean;
+  /** Per-visual breakdown. Empty when the sheet was identical at Tier 1 (no
+   *  detailed pass was needed) or when neither export has any visuals. */
+  visuals: VisualBlockDiff[];
+  /** Visuals whose header text/column order differs but whose data matches. */
+  headerDiffCount: number;
+  /** Visuals that are missing on one side, duplicated a different number of
+   *  times, or otherwise couldn't be unambiguously matched. */
+  structuralDiffCount: number;
+  /** Approximate, human-scale row-diff counts for at-a-glance display — NOT
+   *  used to determine identical/dataIdentical (those are computed from
+   *  `visuals` directly). Kept for backward compatibility with existing
+   *  consumers of this shape (cygnus-main-run.spec.ts, excel-compare.spec.ts). */
+  rowsOnlyInExpected: number;
+  rowsOnlyInActual:   number;
+  /** Up to SAMPLE_SIZE rows only in the expected file (human-readable) */
+  sampleOnlyInExpected: string[][];
+  /** Up to SAMPLE_SIZE rows only in the actual file (human-readable) */
+  sampleOnlyInActual:   string[][];
+}
+
+export interface WorkbookDiffSummary {
+  fileExpected:     string;
+  fileActual:       string;
+  runAt:            string;
+  sheetsOnlyInExpected: string[];
+  sheetsOnlyInActual:   string[];
+  sheets:           SheetDiffSummary[];
+  /** STRICT — every sheet identical, no sheets missing on either side. */
+  identical:        boolean;
+  /** RELAXED — every sheet's data matches, no sheets missing on either side.
+   *  This is what report-parity gates PASS/FAIL on by default. */
+  dataIdentical:    boolean;
+}
+
+// ── Internal constants ────────────────────────────────────────────────────────
+
+const SAMPLE_SIZE = 800; // max sample rows to keep per differing visual's VALUE diff
+// A visual that's entirely missing on one side (or one of several ambiguous
+// variants) doesn't need hundreds of rows reproduced in the Differences
+// sheet to make the point — the Visual Comparison sheet already has its full
+// row count. A short excerpt is plenty and keeps the sheet skimmable.
+const MISSING_VISUAL_SAMPLE_CAP = 20;
+
+// ── Cell normalisation ────────────────────────────────────────────────────────
+
+// Only plain decimals (e.g. "18544.000001"), never bare integers — touching
+// integers risks corrupting IDs like "007" that must keep their exact text.
+const PLAIN_DECIMAL_RE = /^-?\d+\.\d+$/;
+const NUMERIC_ROUND_DECIMALS = 4;
+
+/**
+ * Collapses floating-point noise in decimal-looking text (e.g. a DAX SUM that
+ * lands on "18543.999999997" instead of "18544") by rounding to a fixed number
+ * of decimals and trimming trailing zeros. Bare integers and non-numeric text
+ * are returned untouched, so this never risks reinterpreting an ID or code.
+ */
+function normalizeNumericDrift(text: string): string {
+  if (!PLAIN_DECIMAL_RE.test(text)) return text;
+  const n = Number(text);
+  if (!Number.isFinite(n)) return text;
+  const rounded = n.toFixed(NUMERIC_ROUND_DECIMALS).replace(/0+$/, '').replace(/\.$/, '');
+  return rounded;
+}
+
+/**
+ * Converts a raw ExcelJS cell value to a consistent string so that
+ * formatting-only quirks (extra spaces, number vs string, float drift) don't
+ * produce false mismatches.
+ */
+function normalizeCell(value: ExcelJS.CellValue): string {
+  let raw: string;
+  if (value === null || value === undefined) {
+    raw = '';
+  } else if (value instanceof Date) {
+    raw = value.toISOString();
+  } else if (typeof value === 'object') {
+    // RichText, hyperlink, formula result etc.
+    const v = value as any;
+    if (v.result !== undefined) raw = String(v.result).trim();
+    else if (v.text !== undefined) raw = String(v.text).trim();
+    else raw = JSON.stringify(value);
+  } else {
+    raw = String(value).trim();
+  }
+  return normalizeNumericDrift(raw);
+}
+
+/**
+ * Normalises a row's cell value array into a plain string array.
+ * row.values is 1-indexed in ExcelJS (index 0 is undefined).
+ */
+function normalizeRow(row: ExcelJS.Row): string[] {
+  const vals = row.values as ExcelJS.CellValue[];
+  // slice(1) to drop the 0-index placeholder
+  return (vals || []).slice(1).map(normalizeCell);
+}
+
+// ── Hashing ───────────────────────────────────────────────────────────────────
+
+function hashRow(cells: string[]): string {
+  return crypto.createHash('sha1').update(JSON.stringify(cells)).digest('hex');
+}
+
+function hashRunning(existing: string, rowHash: string): string {
+  return crypto.createHash('sha1').update(existing + rowHash).digest('hex');
+}
+
+// ── Tier 1: whole-sheet ordered hash ──────────────────────────────────────────
+
+interface SheetHashResult {
+  orderedHash: string;
+  rowCount:    number;
+}
+
+async function hashSheetOrdered(filePath: string, sheetName: string): Promise<SheetHashResult> {
+  let orderedHash = '';
+  let rowCount    = 0;
+
+  const reader = new (ExcelJS as any).stream.xlsx.WorkbookReader(filePath, {
+    sharedStrings: 'cache',
+    hyperlinks:    'ignore',
+    styles:        'ignore',
+    entries:       'emit',
+  });
+
+  for await (const ws of reader) {
+    if (ws.name !== sheetName) {
+      for await (const _ of ws) { /* drain so the stream doesn't stall */ }
+      continue;
+    }
+    for await (const row of ws) {
+      const cells = normalizeRow(row as ExcelJS.Row);
+      if (cells.every(c => c === '')) continue; // skip fully-blank spacer rows
+      rowCount++;
+      orderedHash = hashRunning(orderedHash, hashRow(cells));
+    }
+  }
+
+  return { orderedHash, rowCount };
+}
+
+// ── Sheet-name discovery (streaming, cheap) ───────────────────────────────────
+
+async function getSheetNames(filePath: string): Promise<string[]> {
+  const names: string[] = [];
+  const reader = new (ExcelJS as any).stream.xlsx.WorkbookReader(filePath, {
+    sharedStrings: 'cache',
+    hyperlinks:    'ignore',
+    styles:        'ignore',
+    entries:       'emit',
+  });
+  for await (const ws of reader) {
+    names.push(ws.name);
+    for await (const _ of ws) { /* drain */ }
+  }
+  return names;
+}
+
+// ── Tier 2: visual-block parsing ──────────────────────────────────────────────
+//
+// report-export.helpers.ts (writeVisualsToSheet) writes each visual as:
+//   [VISUAL] <title> [<type>]   ← marker row, column A only
+//   <header1> <header2> ...     ← header row
+//   <data rows...>
+//   (blank spacer row)
+// This re-groups the flat row stream back into those blocks. The regex is
+// greedy on the title so it always splits on the LAST "[...]" in the line,
+// which is where writeVisualsToSheet always puts the type — safe even if a
+// visual's title itself happens to contain brackets.
+const VISUAL_MARKER_RE = /^\[VISUAL\]\s+(.+)\s\[([^[\]]+)\]$/;
+
+interface VisualBlockRaw {
+  title:   string;
+  type:    string;
+  headers: string[];
+  rows:    string[][];
+}
+
+async function streamSheetBlocks(filePath: string, sheetName: string): Promise<VisualBlockRaw[]> {
+  const blocks: VisualBlockRaw[] = [];
+  let current: VisualBlockRaw | null = null;
+  let sawHeaderForCurrent = false;
+
+  const reader = new (ExcelJS as any).stream.xlsx.WorkbookReader(filePath, {
+    sharedStrings: 'cache',
+    hyperlinks:    'ignore',
+    styles:        'ignore',
+    entries:       'emit',
+  });
+
+  for await (const ws of reader) {
+    if (ws.name !== sheetName) {
+      for await (const _ of ws) { /* drain */ }
+      continue;
+    }
+    for await (const row of ws) {
+      const cells = normalizeRow(row as ExcelJS.Row);
+      const isBlank = cells.every(c => c === '');
+      const marker  = !isBlank ? cells[0].match(VISUAL_MARKER_RE) : null;
+
+      if (marker) {
+        if (current) blocks.push(current);
+        current = { title: marker[1].trim(), type: marker[2].trim(), headers: [], rows: [] };
+        sawHeaderForCurrent = false;
+        continue;
+      }
+      if (isBlank) continue;       // spacer row between visuals
+      if (!current) continue;      // defensive: content before any marker row
+
+      if (!sawHeaderForCurrent) {
+        current.headers = cells;
+        sawHeaderForCurrent = true;
+      } else {
+        current.rows.push(cells);
+      }
+    }
+  }
+  if (current) blocks.push(current);
+  return blocks;
+}
+
+// ── Tier 2: block matching + comparison ───────────────────────────────────────
+
+function headerKey(headers: string[]): string {
+  return headers.join('\u0001');
+}
+
+/** Order-independent content signature for a block's data rows. */
+function blockDataSignature(rows: string[][]): string {
+  const hashes = rows.map(hashRow).sort();
+  return crypto.createHash('sha1').update(hashes.join('|')).digest('hex');
+}
+
+/**
+ * Collapses blocks that are byte-for-byte identical to each other (same
+ * headers, same data, any row order) into one representative + a count.
+ * This is what lets a slicer that was innocently duplicated on the report
+ * canvas — two visual objects, same title, same bound field, same values —
+ * be treated as "1 visual, ×2 copies" instead of contaminating the diff.
+ */
+function dedupeBlocks(blocks: VisualBlockRaw[]): { representative: VisualBlockRaw; count: number }[] {
+  const groups: { key: string; representative: VisualBlockRaw; count: number }[] = [];
+  for (const b of blocks) {
+    const key = headerKey(b.headers) + '::' + blockDataSignature(b.rows);
+    const existing = groups.find(g => g.key === key);
+    if (existing) existing.count++;
+    else groups.push({ key, representative: b, count: 1 });
+  }
+  return groups.map(({ representative, count }) => ({ representative, count }));
+}
+
+/**
+ * If `headers` and `targetOrder` contain the exact same column names (just
+ * shuffled), remaps every row so column i lines up with targetOrder[i].
+ * Returns null when the header sets genuinely differ (renamed/added/removed
+ * columns) — in that case realignment isn't meaningful and headers are
+ * compared positionally instead.
+ */
+function realignByHeader(headers: string[], rows: string[][], targetOrder: string[]): string[][] | null {
+  if (headers.length !== targetOrder.length) return null;
+  const sortedA = [...headers].sort().join('\u0001');
+  const sortedB = [...targetOrder].sort().join('\u0001');
+  if (sortedA !== sortedB) return null;
+
+  const indexOf = new Map<string, number>();
+  headers.forEach((h, i) => indexOf.set(h, i));
+  return rows.map(r => targetOrder.map(h => r[indexOf.get(h)!] ?? ''));
+}
+
+/** Order-independent row diff between two row sets, with true counts + capped samples. */
+function diffRows(rowsExp: string[][], rowsAct: string[][]) {
+  const expMap = new Map<string, { count: number; sample: string[] }>();
+  for (const r of rowsExp) {
+    const h = hashRow(r);
+    const e = expMap.get(h);
+    if (e) e.count++; else expMap.set(h, { count: 1, sample: r });
+  }
+  const actMap = new Map<string, { count: number; sample: string[] }>();
+  for (const r of rowsAct) {
+    const h = hashRow(r);
+    const e = actMap.get(h);
+    if (e) e.count++; else actMap.set(h, { count: 1, sample: r });
+  }
+
+  let onlyInExpectedCount = 0;
+  let onlyInActualCount   = 0;
+  const sampleOnlyInExpected: string[][] = [];
+  const sampleOnlyInActual:   string[][] = [];
+
+  const allHashes = new Set([...expMap.keys(), ...actMap.keys()]);
+  for (const h of allHashes) {
+    const ce = expMap.get(h)?.count ?? 0;
+    const ca = actMap.get(h)?.count ?? 0;
+    const matched = Math.min(ce, ca);
+    onlyInExpectedCount += ce - matched;
+    onlyInActualCount   += ca - matched;
+    for (let i = 0; i < ce - matched && sampleOnlyInExpected.length < SAMPLE_SIZE; i++) {
+      sampleOnlyInExpected.push(expMap.get(h)!.sample);
+    }
+    for (let i = 0; i < ca - matched && sampleOnlyInActual.length < SAMPLE_SIZE; i++) {
+      sampleOnlyInActual.push(actMap.get(h)!.sample);
+    }
+  }
+
+  return { onlyInExpectedCount, onlyInActualCount, sampleOnlyInExpected, sampleOnlyInActual };
+}
+
+/** Compares one matched (title, type) pair of representative blocks. */
+function compareBlockPair(
+  exp: VisualBlockRaw, expCount: number,
+  act: VisualBlockRaw, actCount: number,
+): VisualBlockDiff {
+  const headersEqual = headerKey(exp.headers) === headerKey(act.headers);
+
+  let actRows = act.rows;
+  let headerNote: string | undefined;
+  if (!headersEqual) {
+    const realigned = realignByHeader(act.headers, act.rows, exp.headers);
+    if (realigned) {
+      actRows = realigned;
+      headerNote = 'Same columns on both sides, different order — realigned by column name before comparing values.';
+    } else {
+      headerNote = 'Column headers differ in text between source and target.';
+    }
+  }
+
+  const expSig  = blockDataSignature(exp.rows);
+  const actSig  = blockDataSignature(actRows);
+  const dataEqual = expSig === actSig;
+
+  let onlyInExpectedCount = 0;
+  let onlyInActualCount   = 0;
+  let sampleOnlyInExpected: string[][] = [];
+  let sampleOnlyInActual:   string[][] = [];
+  if (!dataEqual) {
+    const d = diffRows(exp.rows, actRows);
+    onlyInExpectedCount = d.onlyInExpectedCount;
+    onlyInActualCount   = d.onlyInActualCount;
+    sampleOnlyInExpected = d.sampleOnlyInExpected;
+    sampleOnlyInActual   = d.sampleOnlyInActual;
+  }
+
+  let status: VisualDiffStatus;
+  if (headersEqual && dataEqual && expCount === actCount) status = 'identical';
+  else if (headersEqual && dataEqual)                      status = 'duplicate-count';
+  else if (dataEqual)                                       status = 'header-diff';
+  else                                                       status = 'data-diff';
+
+  const notes: string[] = [];
+  if (headerNote) notes.push(headerNote);
+  if (expCount !== actCount) {
+    notes.push(`Source had ${expCount} identical cop${expCount === 1 ? 'y' : 'ies'} of this visual; target had ${actCount}.`);
+  }
+
+  return {
+    title: exp.title, type: exp.type, status,
+    countExpected: expCount, countActual: actCount,
+    rowsExpected: exp.rows.length, rowsActual: act.rows.length,
+    headerExpected: exp.headers, headerActual: act.headers,
+    sampleOnlyInExpected, sampleOnlyInActual,
+    onlyInExpectedCount, onlyInActualCount,
+    note: notes.length > 0 ? notes.join(' ') : undefined,
+  };
+}
+
+/**
+ * Matches every visual block from the expected export against every visual
+ * block from the actual export, by (title, type) identity rather than row
+ * position, and returns one verdict per visual. See the module-level comment
+ * for why this is more accurate than a flat row diff.
+ */
+function matchVisualBlocks(expectedBlocks: VisualBlockRaw[], actualBlocks: VisualBlockRaw[]): VisualBlockDiff[] {
+  const results: VisualBlockDiff[] = [];
+  const titles = new Set([...expectedBlocks.map(b => b.title), ...actualBlocks.map(b => b.title)]);
+
+  for (const title of titles) {
+    const expForTitle = expectedBlocks.filter(b => b.title === title);
+    const actForTitle = actualBlocks.filter(b => b.title === title);
+    const types = new Set([...expForTitle.map(b => b.type), ...actForTitle.map(b => b.type)]);
+
+    for (const type of types) {
+      const expList = expForTitle.filter(b => b.type === type);
+      const actList = actForTitle.filter(b => b.type === type);
+
+      if (expList.length === 0) {
+        for (const { representative, count } of dedupeBlocks(actList)) {
+          results.push({
+            title, type, status: 'only-in-actual',
+            countExpected: 0, countActual: count,
+            rowsExpected: 0, rowsActual: representative.rows.length,
+            headerExpected: [], headerActual: representative.headers,
+            sampleOnlyInExpected: [], sampleOnlyInActual: representative.rows.slice(0, MISSING_VISUAL_SAMPLE_CAP),
+            onlyInExpectedCount: 0, onlyInActualCount: representative.rows.length * count,
+            note: count > 1 ? `${count} identical copies found, only in target.` : 'Only in target — not present in source.',
+          });
+        }
+        continue;
+      }
+      if (actList.length === 0) {
+        for (const { representative, count } of dedupeBlocks(expList)) {
+          results.push({
+            title, type, status: 'only-in-expected',
+            countExpected: count, countActual: 0,
+            rowsExpected: representative.rows.length, rowsActual: 0,
+            headerExpected: representative.headers, headerActual: [],
+            sampleOnlyInExpected: representative.rows.slice(0, MISSING_VISUAL_SAMPLE_CAP), sampleOnlyInActual: [],
+            onlyInExpectedCount: representative.rows.length * count, onlyInActualCount: 0,
+            note: count > 1 ? `${count} identical copies found, only in source.` : 'Only in source — missing from target.',
+          });
+        }
+        continue;
+      }
+
+      // Both sides have at least one block for this (title, type). Dedupe
+      // exact duplicates within each side first — that's what turns "2
+      // identical copies vs 1" into a clean 1:1 comparison instead of noise.
+      const expDedup = dedupeBlocks(expList);
+      const actDedup = dedupeBlocks(actList);
+
+      if (expDedup.length === 1 && actDedup.length === 1) {
+        results.push(compareBlockPair(
+          expDedup[0].representative, expDedup[0].count,
+          actDedup[0].representative, actDedup[0].count,
+        ));
+        continue;
+      }
+
+      // More than one DISTINCT variant remains on at least one side after
+      // dedup (e.g. two genuinely different visuals share this title). Auto-
+      // pairing here would be a guess, so report it plainly instead of
+      // silently picking a pairing that might be wrong.
+      results.push({
+        title, type, status: 'ambiguous',
+        countExpected: expList.length, countActual: actList.length,
+        rowsExpected: expList.reduce((s, b) => s + b.rows.length, 0),
+        rowsActual:   actList.reduce((s, b) => s + b.rows.length, 0),
+        headerExpected: expDedup[0]?.representative.headers ?? [],
+        headerActual:   actDedup[0]?.representative.headers ?? [],
+        sampleOnlyInExpected: expDedup.flatMap(d => d.representative.rows.slice(0, 5)),
+        sampleOnlyInActual:   actDedup.flatMap(d => d.representative.rows.slice(0, 5)),
+        onlyInExpectedCount: expList.reduce((s, b) => s + b.rows.length, 0),
+        onlyInActualCount:   actList.reduce((s, b) => s + b.rows.length, 0),
+        note: `Found ${expDedup.length} distinct variant(s) of "${title} [${type}]" in source and ${actDedup.length} in target — ` +
+              `could not unambiguously match them to each other. Open both files and check this visual manually.`,
+      });
+    }
+  }
+
+  return results;
+}
+
+// ── Main public function ──────────────────────────────────────────────────────
+
+/**
+ * Compares two Excel workbooks: Tier 1 fast ordered-hash check per sheet,
+ * falling through to the visual-block-aware Tier 2 comparison on any
+ * mismatch. See the module-level comment for the full design.
+ *
+ * @param fileExpected  Path to the expected (baseline) .xlsx file
+ * @param fileActual    Path to the actual (current run) .xlsx file
+ */
+export async function compareWorkbooks(
+  fileExpected: string,
+  fileActual:   string,
+): Promise<WorkbookDiffSummary> {
+  const sheetsExpected = await getSheetNames(fileExpected);
+  const sheetsActual   = await getSheetNames(fileActual);
+
+  const setExpected = new Set(sheetsExpected);
+  const setActual   = new Set(sheetsActual);
+
+  const sheetsOnlyInExpected = sheetsExpected.filter(s => !setActual.has(s));
+  const sheetsOnlyInActual   = sheetsActual.filter(s => !setExpected.has(s));
+  const commonSheets         = sheetsExpected.filter(s => setActual.has(s));
+
+  const sheetResults: SheetDiffSummary[] = [];
+
+  const emptySheetResult = (sheet: string, inExpected: boolean, inActual: boolean): SheetDiffSummary => ({
+    sheet, inExpected, inActual,
+    rowsExpected: 0, rowsActual: 0,
+    identical: false, dataIdentical: false,
+    visuals: [], headerDiffCount: 0, structuralDiffCount: 0,
+    rowsOnlyInExpected: 0, rowsOnlyInActual: 0,
+    sampleOnlyInExpected: [], sampleOnlyInActual: [],
+  });
+
+  for (const s of sheetsOnlyInExpected) sheetResults.push(emptySheetResult(s, true, false));
+  for (const s of sheetsOnlyInActual)   sheetResults.push(emptySheetResult(s, false, true));
+
+  // Common sheets — Tier 1 then Tier 2
+  for (const sheetName of commonSheets) {
+    const [expHash, actHash] = await Promise.all([
+      hashSheetOrdered(fileExpected, sheetName),
+      hashSheetOrdered(fileActual,   sheetName),
+    ]);
+
+    if (expHash.orderedHash === actHash.orderedHash) {
+      // Fast path: byte-identical, no need for the detailed pass.
+      sheetResults.push({
+        sheet: sheetName, inExpected: true, inActual: true,
+        rowsExpected: expHash.rowCount, rowsActual: actHash.rowCount,
+        identical: true, dataIdentical: true,
+        visuals: [], headerDiffCount: 0, structuralDiffCount: 0,
+        rowsOnlyInExpected: 0, rowsOnlyInActual: 0,
+        sampleOnlyInExpected: [], sampleOnlyInActual: [],
+      });
+      continue;
+    }
+
+    // Tier 2: visual-block-aware detailed comparison.
+    const [expBlocks, actBlocks] = await Promise.all([
+      streamSheetBlocks(fileExpected, sheetName),
+      streamSheetBlocks(fileActual,   sheetName),
+    ]);
+    const visuals = matchVisualBlocks(expBlocks, actBlocks);
+
+    const identical      = visuals.length > 0 ? visuals.every(v => v.status === 'identical') : true;
+    const dataIdentical   = visuals.every(v =>
+      v.status === 'identical' || v.status === 'header-diff' || v.status === 'duplicate-count',
+    );
+    const headerDiffCount = visuals.filter(v => v.status === 'header-diff').length;
+    const structuralDiffCount = visuals.filter(v =>
+      v.status === 'only-in-expected' || v.status === 'only-in-actual' ||
+      v.status === 'ambiguous' || v.status === 'duplicate-count',
+    ).length;
+
+    // Approximate, display-only aggregate row counts — NOT the source of
+    // truth for identical/dataIdentical (see field docs above).
+    let rowsOnlyInExpected = 0;
+    let rowsOnlyInActual   = 0;
+    const sampleOnlyInExpected: string[][] = [];
+    const sampleOnlyInActual:   string[][] = [];
+    const pushCapped = (arr: string[][], items: string[][]) => {
+      for (const r of items) {
+        if (arr.length >= SAMPLE_SIZE) break;
+        arr.push(r);
+      }
+    };
+    for (const v of visuals) {
+      if (v.status === 'identical' || v.status === 'duplicate-count') continue;
+      if (v.status === 'header-diff') {
+        rowsOnlyInExpected += 1;
+        rowsOnlyInActual   += 1;
+        pushCapped(sampleOnlyInExpected, [v.headerExpected]);
+        pushCapped(sampleOnlyInActual,   [v.headerActual]);
+        continue;
+      }
+      rowsOnlyInExpected += v.onlyInExpectedCount;
+      rowsOnlyInActual   += v.onlyInActualCount;
+      pushCapped(sampleOnlyInExpected, v.sampleOnlyInExpected);
+      pushCapped(sampleOnlyInActual,   v.sampleOnlyInActual);
+    }
+
+    sheetResults.push({
+      sheet: sheetName, inExpected: true, inActual: true,
+      rowsExpected: expHash.rowCount, rowsActual: actHash.rowCount,
+      identical, dataIdentical,
+      visuals, headerDiffCount, structuralDiffCount,
+      rowsOnlyInExpected, rowsOnlyInActual,
+      sampleOnlyInExpected, sampleOnlyInActual,
+    });
+  }
+
+  const noSheetsMissing = sheetsOnlyInExpected.length === 0 && sheetsOnlyInActual.length === 0;
+  const identical     = noSheetsMissing && sheetResults.every(s => s.identical);
+  const dataIdentical = noSheetsMissing && sheetResults.every(s => s.dataIdentical);
+
+  return {
+    fileExpected: path.basename(fileExpected),
+    fileActual:   path.basename(fileActual),
+    runAt:        new Date().toISOString(),
+    sheetsOnlyInExpected,
+    sheetsOnlyInActual,
+    sheets: sheetResults,
+    identical,
+    dataIdentical,
+  };
+}

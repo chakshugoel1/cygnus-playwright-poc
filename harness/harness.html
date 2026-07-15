@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<!--
+  Power BI Harness Page — served via Playwright page.route(), never hits a real server.
+
+  Origin: http://localhost:3001 (intercepted by Playwright)
+  Purpose: Embed the Cygnus Power BI report using TokenType.Aad (user token)
+           and expose visual.exportData() results to Playwright tests.
+
+  API exposed on window:
+    __startEmbed(token)            → Promise<void>  embed the report, resolves on 'rendered'
+    __getPages()                   → Promise<Array<{name, displayName}>>
+    __setPage(pageName)            → Promise<void>  navigate to a report page by internal name
+    __exportPageVisuals()          → Promise<VisualResult[]>  export all visuals on current page
+    __rendered                     → boolean  true after first render
+    __lastError                    → string | null
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>PBI Harness</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body, html { width: 100%; height: 100%; overflow: hidden; }
+    #embed-container { width: 100vw; height: 100vh; }
+  </style>
+  <!-- Power BI JavaScript Client API -->
+  <script src="https://cdn.jsdelivr.net/npm/powerbi-client@2.23.1/dist/powerbi.min.js"></script>
+</head>
+<body>
+  <div id="embed-container"></div>
+
+  <script>
+    // ── Report identifiers ──────────────────────────────────────────────────
+    // embedUrl is injected by Playwright via window.__startEmbed(token, embedUrl)
+    // and already includes the correct reportId + cluster routing for the tenant.
+
+    // ── State ───────────────────────────────────────────────────────────────
+    window.__rendered  = false;
+    window.__lastError = null;
+    window.__report    = null;
+
+    // ── TokenType.Embed = 0 (Power BI-specific embed token from GenerateToken API)
+    // Using numeric values to avoid import dependency on models object.
+    // TokenType.Embed = 0 → no appid validation, cluster info is inside the token.
+    var TOKEN_TYPE_EMBED       = 0;
+    var EXPORT_TYPE_SUMMARIZED = 0;
+
+    // ── Embed the report ────────────────────────────────────────────────────
+    window.__startEmbed = function(token, embedUrl) {
+      return new Promise(function(resolve, reject) {
+        var reportId = null;
+        try {
+          reportId = new URL(embedUrl).searchParams.get('reportId');
+        } catch (e) {
+          reportId = null;
+        }
+        if (!reportId) {
+          var missingIdMsg = 'Embed URL missing reportId query parameter';
+          window.__lastError = missingIdMsg;
+          reject(new Error(missingIdMsg));
+          return;
+        }
+
+        var container = document.getElementById('embed-container');
+        var config = {
+          type:        'report',
+          id:          reportId,
+          embedUrl:    embedUrl,
+          accessToken: token,
+          tokenType:   TOKEN_TYPE_EMBED,
+          settings: {
+            navContentPaneEnabled: false,
+            filterPaneEnabled:     false,
+            background:            1,   // Transparent
+          }
+        };
+
+        var report = window.powerbi.embed(container, config);
+        window.__report = report;
+
+        report.on('rendered', function() {
+          window.__rendered = true;
+          resolve();
+        });
+
+        report.on('error', function(event) {
+          var msg = 'Power BI embed error: ' + JSON.stringify(event.detail);
+          window.__lastError = msg;
+          reject(new Error(msg));
+        });
+
+        // Fallback timeout — 3 minutes
+        setTimeout(function() {
+          if (!window.__rendered) {
+            var msg = 'Timeout: report did not render within 3 minutes';
+            window.__lastError = msg;
+            reject(new Error(msg));
+          }
+        }, 180000);
+      });
+    };
+
+    // ── List all report pages ───────────────────────────────────────────────
+    window.__getPages = async function() {
+      var pages = await window.__report.getPages();
+      return pages.map(function(p) {
+        return { name: p.name, displayName: p.displayName };
+      });
+    };
+
+    // ── Navigate to a report page ────────────────────────────────────────────
+    window.__setPage = async function(pageName) {
+      await window.__report.setPage(pageName);
+      // Wait for the page to settle after navigation
+      await new Promise(function(r) { setTimeout(r, 4000); });
+    };
+
+    // ── Export all visuals on the current active page ────────────────────────
+    window.__exportPageVisuals = async function() {
+      var pages   = await window.__report.getPages();
+      var active  = pages.find(function(p) { return p.isActive; }) || pages[0];
+      var visuals = await active.getVisuals();
+
+      var results = [];
+      for (var i = 0; i < visuals.length; i++) {
+        var visual = visuals[i];
+        var entry = {
+          name:         visual.name,
+          title:        visual.title,
+          type:         visual.type,
+          layout:       visual.layout,
+          csvData:      null,
+          errorMessage: null
+        };
+
+        try {
+          var exported = await visual.exportData(EXPORT_TYPE_SUMMARIZED);
+          entry.csvData = exported.data;
+        } catch(e) {
+          // Power BI SDK throws structured objects, not standard Errors;
+          // serialize properly so callers get a meaningful message.
+          entry.errorMessage = e && e.message
+            ? e.message
+            : (e && e.code ? e.code : JSON.stringify(e));
+        }
+
+        results.push(entry);
+      }
+
+      return results;
+    };
+  </script>
+</body>
+</html>

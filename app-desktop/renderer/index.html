@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Validation Script Runner</title>
+  <style>
+    :root {
+      --bg: #f7f9fc;
+      --card: #ffffff;
+      --ink: #1b2535;
+      --muted: #637189;
+      --accent: #0f766e;
+      --accent-2: #155e75;
+      --border: #d6deea;
+      --danger: #b42318;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+      background: radial-gradient(circle at top right, #e7f5f3 0%, var(--bg) 55%);
+      color: var(--ink);
+    }
+    .app {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 20px;
+      display: grid;
+      gap: 16px;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 14px;
+      box-shadow: 0 6px 24px rgba(15, 23, 42, 0.07);
+    }
+    h1 {
+      margin: 0;
+      font-size: 24px;
+      letter-spacing: 0.2px;
+    }
+    .sub {
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+    .fields {
+      display: grid;
+      gap: 10px;
+    }
+    .row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      align-items: start;
+    }
+    .field-wrap {
+      display: grid;
+      gap: 4px;
+    }
+    label { font-size: 13px; color: var(--muted); }
+    input {
+      width: 100%;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 10px;
+      font-size: 13px;
+      color: var(--ink);
+      background: #fff;
+    }
+    input:focus { outline: 2px solid rgba(15, 118, 110, 0.2); border-color: var(--accent); }
+    .section-title { font-weight: 600; margin-bottom: 8px; }
+    .note { font-size: 12px; color: var(--muted); }
+    .danger { color: var(--danger); }
+    .actions {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    button {
+      border: none;
+      border-radius: 8px;
+      padding: 9px 14px;
+      font-size: 13px;
+      color: #fff;
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      cursor: pointer;
+    }
+    button.secondary { background: #334155; }
+    button:disabled { opacity: 0.55; cursor: not-allowed; }
+    .status {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--accent-2);
+    }
+    #log {
+      margin-top: 8px;
+      background: #0f172a;
+      color: #d1f9f3;
+      border-radius: 8px;
+      min-height: 300px;
+      max-height: 420px;
+      overflow: auto;
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 12px;
+      padding: 10px;
+      line-height: 1.4;
+      white-space: pre-wrap;
+    }
+    @media (max-width: 860px) {
+      .grid { grid-template-columns: 1fr; }
+      .row { grid-template-columns: 1fr; gap: 6px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <div class="card">
+      <h1>Validation Script Runner</h1>
+      <div class="sub">Runs your existing scripts without changing login handling.</div>
+    </div>
+
+    <div class="card">
+      <div class="grid">
+        <div>
+          <div class="section-title">Source Report (Expected)</div>
+          <div class="fields" id="source-fields"></div>
+        </div>
+        <div>
+          <div class="section-title">Target Report (Actual)</div>
+          <div class="fields" id="target-fields"></div>
+        </div>
+      </div>
+      <div style="margin-top:10px" class="fields">
+        <div class="row">
+          <div class="field-wrap">
+            <label for="pairName">Pair Name</label>
+          </div>
+          <input id="pairName" value="" placeholder="Enter pair name" />
+        </div>
+        <div class="row"><label for="pagesCsv">Pages CSV (optional)</label><input id="pagesCsv" placeholder="Employee, Manager, DU Head, CXO" /></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="actions">
+        <button id="btnSetup" class="secondary">Run Auth Setup Only</button>
+        <button id="btnParity">Run Parity Only</button>
+        <button id="btnBoth">Run Auth Setup + Parity</button>
+      </div>
+      <div style="margin-top:10px" class="status" id="status">State: Idle</div>
+      <div id="log"></div>
+    </div>
+  </div>
+
+  <script src="./app.js"></script>
+</body>
+</html>
