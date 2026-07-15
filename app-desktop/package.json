@@ -1,0 +1,35 @@
+{
+  "name": "cygnus-desktop-runner",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Desktop wrapper for Cygnus Playwright setup/parity scripts",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "launch": "cmd /c \"launch-desktop.bat\"",
+    "make-shortcut": "powershell -NoProfile -ExecutionPolicy Bypass -File CreateDesktopShortcut.ps1",
+    "dist": "electron-builder --win portable",
+    "pack": "electron-builder --dir"
+  },
+  "devDependencies": {
+    "electron": "^31.7.7",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.cygnus.desktoprunner",
+    "productName": "Cygnus Desktop Runner",
+    "asar": true,
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/**/*",
+      "package.json"
+    ],
+    "portable": {
+      "artifactName": "Cygnus Desktop Runner-${version}-portable.${ext}"
+    },
+    "win": {
+      "target": ["portable"]
+    }
+  }
+}

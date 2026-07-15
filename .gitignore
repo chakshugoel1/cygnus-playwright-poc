@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+
+# Playwright output
+test-results/
+playwright-report/
+playwright-report-cygnus/
+playwright-report-parity/
+
+# Credentials & auth state — NEVER commit these
+.env
+*.env
+.env.*
+**/.auth/
+**/cygnus.user.json
+**/askme.user.json
+
+# Test history (local run data)
+test-history/
+
+# Build output
+dist/
+
+# Desktop wrapper artifacts
+app-desktop/node_modules/
+.runtime/
+
+# Service principal credentials
+pbi-service-principal.json
+# Unrelated bundled project / archives (not part of this POC)
+AskMe/
+AskMe.zip   
+archive-unused-files/

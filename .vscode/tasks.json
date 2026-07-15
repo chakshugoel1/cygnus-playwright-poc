@@ -1,0 +1,498 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "check-node-npm-versions",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"node -v && npm -v"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "check-sp-json-shape",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"$p = Join-Path $env:USERPROFILE '.askme-poc-secrets\\pbi-service-principal.json'; if (-not (Test-Path $p)) { Write-Output 'exists=false'; exit 0 }; Write-Output 'exists=true'; try { $j = Get-Content $p -Raw | ConvertFrom-Json; Write-Output 'jsonValid=true'; Write-Output ('tenantIdPresent=' + [bool]($j.tenantId)); Write-Output ('clientIdPresent=' + [bool]($j.clientId)); Write-Output ('clientSecretPresent=' + [bool]($j.clientSecret)); } catch { Write-Output 'jsonValid=false'; }"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "check-winget",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"winget --version"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "check-node-path",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"where node"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "install-node-lts",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"winget install -e --id OpenJS.NodeJS.LTS --accept-package-agreements --accept-source-agreements"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "check-node-install-dir",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"if exist \"C:\\Program Files\\nodejs\\node.exe\" (echo FOUND) else (echo MISSING)"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "node-version-absolute",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"\"C:\\Program Files\\nodejs\\node.exe\" -v"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "npm-version-absolute",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"\"C:\\Program Files\\nodejs\\npm.cmd\" -v"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "node-version-shortpath",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"C:\\Progra~1\\nodejs\\node.exe -v"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "npm-version-shortpath",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"C:\\Progra~1\\nodejs\\npm.cmd -v"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "npm-install-shortpath",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PATH=C:\\Progra~1\\nodejs;%PATH% && C:\\Progra~1\\nodejs\\npm.cmd install"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "install-browsers-shortpath",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PATH=C:\\Progra~1\\nodejs;%PATH% && C:\\Progra~1\\nodejs\\npm.cmd run install-browsers"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "test-list-shortpath",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PATH=C:\\Progra~1\\nodejs;%PATH% && C:\\Progra~1\\nodejs\\npm.cmd run test -- --list"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "check-sp-json-node",
+			"type": "shell",
+			"command": "C:\\Progra~1\\nodejs\\node.exe",
+			"args": [
+				"-e",
+				"const fs=require('fs'); const p=process.env.USERPROFILE+'\\\\.askme-poc-secrets\\\\pbi-service-principal.json'; if(!fs.existsSync(p)){console.log('exists=false'); process.exit(0);} console.log('exists=true'); try{const j=JSON.parse(fs.readFileSync(p,'utf8')); console.log('jsonValid=true'); console.log('tenantIdPresent='+Boolean(j.tenantId)); console.log('clientIdPresent='+Boolean(j.clientId)); console.log('clientSecretPresent='+Boolean(j.clientSecret));}catch{console.log('jsonValid=false');}"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "run-auth-setup",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PATH=C:\\Progra~1\\nodejs;%PATH% && C:\\Progra~1\\nodejs\\npm.cmd run test:setup"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "run-main-run",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PATH=C:\\Progra~1\\nodejs;%PATH% && C:\\Progra~1\\nodejs\\npm.cmd run main:run"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "check-sp-json-ps-safe",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"powershell -NoProfile -Command \"$p=Join-Path $env:USERPROFILE '.askme-poc-secrets\\pbi-service-principal.json'; if(!(Test-Path $p)){ 'exists=false'; exit 0 }; 'exists=true'; try{$j=Get-Content $p -Raw | ConvertFrom-Json; 'jsonValid=true'; 'tenantIdPresent=' + [bool]$j.tenantId; 'clientIdPresent=' + [bool]$j.clientId; 'clientSecretPresent=' + [bool]$j.clientSecret } catch { 'jsonValid=false' }\""
+			],
+			"isBackground": false
+		},
+		{
+			"label": "check-sp-json-node-safe",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"C:\\Progra~1\\nodejs\\node.exe -e \"const fs=require(\\\"fs\\\");const p=process.env.USERPROFILE+\\\"\\\\\\\\.askme-poc-secrets\\\\\\\\pbi-service-principal.json\\\";if(!fs.existsSync(p)){console.log(\\\"exists=false\\\");process.exit(0);}console.log(\\\"exists=true\\\");try{const j=JSON.parse(fs.readFileSync(p,\\\"utf8\\\"));console.log(\\\"jsonValid=true\\\");console.log(\\\"tenantIdPresent=\\\"+Boolean(j.tenantId));console.log(\\\"clientIdPresent=\\\"+Boolean(j.clientId));console.log(\\\"clientSecretPresent=\\\"+Boolean(j.clientSecret));}catch(e){console.log(\\\"jsonValid=false\\\");}\""
+			],
+			"isBackground": false
+		},
+		{
+			"label": "run-sp-json-check-script",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"C:\\Progra~1\\nodejs\\node.exe archive-unused-files\\_tmp_check_sp_json.js"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "resolve-dataset-from-report-url",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"C:\\Progra~1\\nodejs\\node.exe archive-unused-files\\_tmp_resolve_dataset_from_report.js"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "count-auth-state-lines",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"powershell -NoProfile -Command \"(Get-Content $env:USERPROFILE\\.askme-poc-secrets\\.auth\\cygnus.user.json | Measure-Object -Line).Lines\""
+			],
+			"isBackground": false
+		},
+		{
+			"label": "dump-auth-storage-keys",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"C:\\Progra~1\\nodejs\\node.exe archive-unused-files\\_tmp_dump_auth_keys.js"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "resolve-dataset-live",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PATH=C:\\Progra~1\\nodejs;%PATH% && C:\\Progra~1\\nodejs\\node.exe archive-unused-files\\_tmp_resolve_dataset_from_report.js"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "run-auth-setup-abs",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"& \"C:\\Program Files\\nodejs\\npm.cmd\" run test:setup"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "run-auth-setup-shortpath-now",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PATH=C:\\Progra~1\\nodejs;%PATH% && C:\\Progra~1\\nodejs\\npm.cmd run test:setup"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "run-main-run-shortpath-now",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PATH=C:\\Progra~1\\nodejs;%PATH% && C:\\Progra~1\\nodejs\\npm.cmd run main:run"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "fix-npm-path-permanent",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"powershell -NoProfile -NonInteractive -Command \"$cur=[Environment]::GetEnvironmentVariable('Path','User'); if ($cur -notlike '*nodejs*') { [Environment]::SetEnvironmentVariable('Path', $cur + ';C:\\Program Files\\nodejs', 'User'); Write-Host 'PATH updated' } else { Write-Host 'PATH already contains nodejs' }\""
+			],
+			"isBackground": false
+		},
+		{
+			"label": "fix-npm-path-via-script",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoProfile -ExecutionPolicy Bypass -File archive-unused-files\\_tmp_fix_path.ps1"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "resolve-dataset-live",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PATH=C:\\Progra~1\\nodejs;%PATH% && C:\\Progra~1\\nodejs\\node.exe archive-unused-files\\_tmp_resolve_dataset_from_report.js"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "run-auth-setup-shortpath-now",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PATH=C:\\Progra~1\\nodejs;%PATH% && C:\\Progra~1\\nodejs\\npm.cmd run test:setup"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "run-main-run-shortpath-now",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PATH=C:\\Progra~1\\nodejs;%PATH% && C:\\Progra~1\\nodejs\\npm.cmd run main:run"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "fix-log-message",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"C:\\Progra~1\\nodejs\\node.exe -e \"const fs=require('fs');const f='tests/helpers/cygnus.helpers.ts';const s=fs.readFileSync(f,'utf8');const n=s.replace('\\u00e2\\u0080\\u00b3 Navigating directly to CygnusIN_gantt_chart report...','\\u23f3 Navigating to report: '+process.env.CYGNUS_REPORT_URL);if(s===n){console.log('NOT_FOUND');}else{fs.writeFileSync(f,n,'utf8');console.log('REPLACED');}\""
+			],
+			"isBackground": false
+		},
+		{
+			"label": "fix-log-msg-script",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"C:\\Progra~1\\nodejs\\node.exe archive-unused-files\\_tmp_fix_log.js"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "clear-legacy-env-overrides",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"powershell -NoProfile -ExecutionPolicy Bypass -File archive-unused-files\\_tmp_clear_legacy_env.ps1"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "run-auth-setup-forced-fabric",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PATH=C:\\Progra~1\\nodejs;%PATH% && set CYGNUS_REPORT_URL=https://app.powerbi.com/groups/3f3f8c93-4762-459f-8b68-c36893aac01b/reports/2ba857e0-e07f-4475-81c4-427cbd95cd9e/7189e1e33053e4e12a7c?experience=power-bi^&clientSideAuth=0 && set CYGNUS_WORKSPACE_URL=https://app.powerbi.com/groups/3f3f8c93-4762-459f-8b68-c36893aac01b/list?experience=power-bi^&clientSideAuth=0^&subfolderId=81740 && set CYGNUS_DATASET_ID=fbb612a3-0d0f-43c8-b2a7-317d8d59d423 && set CYGNUS_RLS_ROLE= && set CYGNUS_TARGET_PAGES_JSON= && C:\\Progra~1\\nodejs\\npm.cmd run test:setup"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "run-main-run-forced-fabric",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PATH=C:\\Progra~1\\nodejs;%PATH% && set CYGNUS_REPORT_URL=https://app.powerbi.com/groups/3f3f8c93-4762-459f-8b68-c36893aac01b/reports/2ba857e0-e07f-4475-81c4-427cbd95cd9e/7189e1e33053e4e12a7c?experience=power-bi^&clientSideAuth=0 && set CYGNUS_WORKSPACE_URL=https://app.powerbi.com/groups/3f3f8c93-4762-459f-8b68-c36893aac01b/list?experience=power-bi^&clientSideAuth=0^&subfolderId=81740 && set CYGNUS_DATASET_ID=fbb612a3-0d0f-43c8-b2a7-317d8d59d423 && set CYGNUS_RLS_ROLE= && set CYGNUS_TARGET_PAGES_JSON= && C:\\Progra~1\\nodejs\\npm.cmd run main:run"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "inspect-user-machine-cygnus-env",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"$keys=@('CYGNUS_REPORT_URL','CYGNUS_WORKSPACE_URL','CYGNUS_DATASET_ID','CYGNUS_GROUP_ID','CYGNUS_REPORT_ID','PowerBIWorkspaceId','PowerBIReportId','PowerBIDatasetId','PowerBITenantId'); Write-Host '--- USER ---'; foreach($k in $keys){$v=[Environment]::GetEnvironmentVariable($k,'User'); if($null -ne $v -and $v -ne ''){Write-Host ($k+'='+$v)}}; Write-Host '--- MACHINE ---'; foreach($k in $keys){$v=[Environment]::GetEnvironmentVariable($k,'Machine'); if($null -ne $v -and $v -ne ''){Write-Host ($k+'='+$v)}}"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "inspect-current-shell-cygnus-env",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set CYGNUS_ & set PowerBI"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "dump-env-overrides",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"powershell -NoProfile -ExecutionPolicy Bypass -File archive-unused-files\\_tmp_dump_env_overrides.ps1"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "print-effective-config",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PATH=C:\\Progra~1\\nodejs;%PATH% && C:\\Progra~1\\nodejs\\node.exe archive-unused-files\\_tmp_effective_config.js"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "run-main-run-forced-fabric",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PATH=C:\\Progra~1\\nodejs;%PATH% && set CYGNUS_REPORT_URL=https://app.powerbi.com/groups/3f3f8c93-4762-459f-8b68-c36893aac01b/reports/2ba857e0-e07f-4475-81c4-427cbd95cd9e/7189e1e33053e4e12a7c?experience=power-bi^&clientSideAuth=0 && set CYGNUS_WORKSPACE_URL=https://app.powerbi.com/groups/3f3f8c93-4762-459f-8b68-c36893aac01b/list?experience=power-bi^&clientSideAuth=0^&subfolderId=81740 && set CYGNUS_DATASET_ID=fbb612a3-0d0f-43c8-b2a7-317d8d59d423 && set CYGNUS_RLS_ROLE= && set CYGNUS_TARGET_PAGES_JSON= && set PowerBIWorkspaceId= && set PowerBIReportId= && set CYGNUS_GROUP_ID= && set CYGNUS_REPORT_ID= && C:\\Progra~1\\nodejs\\npm.cmd run main:run"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "run-auth-setup-forced-fabric",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PATH=C:\\Progra~1\\nodejs;%PATH% && set CYGNUS_REPORT_URL=https://app.powerbi.com/groups/3f3f8c93-4762-459f-8b68-c36893aac01b/reports/2ba857e0-e07f-4475-81c4-427cbd95cd9e/7189e1e33053e4e12a7c?experience=power-bi^&clientSideAuth=0 && set CYGNUS_WORKSPACE_URL=https://app.powerbi.com/groups/3f3f8c93-4762-459f-8b68-c36893aac01b/list?experience=power-bi^&clientSideAuth=0^&subfolderId=81740 && set CYGNUS_DATASET_ID=fbb612a3-0d0f-43c8-b2a7-317d8d59d423 && set CYGNUS_RLS_ROLE= && set CYGNUS_TARGET_PAGES_JSON= && set PowerBIWorkspaceId= && set PowerBIReportId= && set CYGNUS_GROUP_ID= && set CYGNUS_REPORT_ID= && C:\\Progra~1\\nodejs\\npm.cmd run test:setup"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "run-main-run-forced-fabric",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PATH=C:\\Progra~1\\nodejs;%PATH% && set CYGNUS_REPORT_URL=https://app.powerbi.com/groups/3f3f8c93-4762-459f-8b68-c36893aac01b/reports/2ba857e0-e07f-4475-81c4-427cbd95cd9e/7189e1e33053e4e12a7c?experience=power-bi^&clientSideAuth=0 && set CYGNUS_WORKSPACE_URL=https://app.powerbi.com/groups/3f3f8c93-4762-459f-8b68-c36893aac01b/list?experience=power-bi^&clientSideAuth=0^&subfolderId=81740 && set CYGNUS_DATASET_ID=fbb612a3-0d0f-43c8-b2a7-317d8d59d423 && set CYGNUS_RLS_ROLE= && set CYGNUS_TARGET_PAGES_JSON= && set PowerBIWorkspaceId= && set PowerBIReportId= && set CYGNUS_GROUP_ID= && set CYGNUS_REPORT_ID= && C:\\Progra~1\\nodejs\\npm.cmd run main:run"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "run-main-run-forced-fabric-now-2",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PATH=C:\\Progra~1\\nodejs;%PATH% && set CYGNUS_REPORT_URL=https://app.powerbi.com/groups/3f3f8c93-4762-459f-8b68-c36893aac01b/reports/2ba857e0-e07f-4475-81c4-427cbd95cd9e/7189e1e33053e4e12a7c?experience=power-bi^&clientSideAuth=0 && set CYGNUS_WORKSPACE_URL=https://app.powerbi.com/groups/3f3f8c93-4762-459f-8b68-c36893aac01b/list?experience=power-bi^&clientSideAuth=0^&subfolderId=81740 && set CYGNUS_DATASET_ID=fbb612a3-0d0f-43c8-b2a7-317d8d59d423 && set CYGNUS_RLS_ROLE= && set CYGNUS_TARGET_PAGES_JSON= && set PowerBIWorkspaceId= && set PowerBIReportId= && set CYGNUS_GROUP_ID= && set CYGNUS_REPORT_ID= && C:\\Progra~1\\nodejs\\npm.cmd run main:run"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "run-main-run-forced-fabric-now-3",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PATH=C:\\Progra~1\\nodejs;%PATH% && set CYGNUS_REPORT_URL=https://app.powerbi.com/groups/3f3f8c93-4762-459f-8b68-c36893aac01b/reports/2ba857e0-e07f-4475-81c4-427cbd95cd9e/7189e1e33053e4e12a7c?experience=power-bi^&clientSideAuth=0 && set CYGNUS_WORKSPACE_URL=https://app.powerbi.com/groups/3f3f8c93-4762-459f-8b68-c36893aac01b/list?experience=power-bi^&clientSideAuth=0^&subfolderId=81740 && set CYGNUS_DATASET_ID=fbb612a3-0d0f-43c8-b2a7-317d8d59d423 && set CYGNUS_RLS_ROLE= && set CYGNUS_TARGET_PAGES_JSON= && set PowerBIWorkspaceId= && set PowerBIReportId= && set CYGNUS_GROUP_ID= && set CYGNUS_REPORT_ID= && C:\\Progra~1\\nodejs\\npm.cmd run main:run"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "run-main-run-forced-fabric-now-verify",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PATH=C:\\Progra~1\\nodejs;%PATH% && set CYGNUS_REPORT_URL=https://app.powerbi.com/groups/3f3f8c93-4762-459f-8b68-c36893aac01b/reports/2ba857e0-e07f-4475-81c4-427cbd95cd9e/7189e1e33053e4e12a7c?experience=power-bi^&clientSideAuth=0 && set CYGNUS_WORKSPACE_URL=https://app.powerbi.com/groups/3f3f8c93-4762-459f-8b68-c36893aac01b/list?experience=power-bi^&clientSideAuth=0^&subfolderId=81740 && set CYGNUS_DATASET_ID=fbb612a3-0d0f-43c8-b2a7-317d8d59d423 && set CYGNUS_RLS_ROLE= && set CYGNUS_TARGET_PAGES_JSON= && set PowerBIWorkspaceId= && set PowerBIReportId= && set CYGNUS_GROUP_ID= && set CYGNUS_REPORT_ID= && C:\\Progra~1\\nodejs\\npm.cmd run main:run"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "run-main-run-forced-fabric-now-final",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PATH=C:\\Progra~1\\nodejs;%PATH% && set CYGNUS_REPORT_URL=https://app.powerbi.com/groups/3f3f8c93-4762-459f-8b68-c36893aac01b/reports/2ba857e0-e07f-4475-81c4-427cbd95cd9e/7189e1e33053e4e12a7c?experience=power-bi^&clientSideAuth=0 && set CYGNUS_WORKSPACE_URL=https://app.powerbi.com/groups/3f3f8c93-4762-459f-8b68-c36893aac01b/list?experience=power-bi^&clientSideAuth=0^&subfolderId=81740 && set CYGNUS_DATASET_ID=fbb612a3-0d0f-43c8-b2a7-317d8d59d423 && set CYGNUS_RLS_ROLE= && set CYGNUS_TARGET_PAGES_JSON= && set PowerBIWorkspaceId= && set PowerBIReportId= && set CYGNUS_GROUP_ID= && set CYGNUS_REPORT_ID= && C:\\Progra~1\\nodejs\\npm.cmd run main:run"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "run-main-run-forced-fabric-now-url-check",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PATH=C:\\Progra~1\\nodejs;%PATH% && set CYGNUS_REPORT_URL=https://app.powerbi.com/groups/3f3f8c93-4762-459f-8b68-c36893aac01b/reports/2ba857e0-e07f-4475-81c4-427cbd95cd9e/7189e1e33053e4e12a7c?experience=power-bi^&clientSideAuth=0 && set CYGNUS_WORKSPACE_URL=https://app.powerbi.com/groups/3f3f8c93-4762-459f-8b68-c36893aac01b/list?experience=power-bi^&clientSideAuth=0^&subfolderId=81740 && set CYGNUS_DATASET_ID=fbb612a3-0d0f-43c8-b2a7-317d8d59d423 && set CYGNUS_RLS_ROLE= && set CYGNUS_TARGET_PAGES_JSON= && set PowerBIWorkspaceId= && set PowerBIReportId= && set CYGNUS_GROUP_ID= && set CYGNUS_REPORT_ID= && C:\\Progra~1\\nodejs\\npm.cmd run main:run"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "run-main-run-forced-fabric-emptyvars-fixed",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"set PATH=C:\\Progra~1\\nodejs;%PATH% && set CYGNUS_REPORT_URL=https://app.powerbi.com/groups/3f3f8c93-4762-459f-8b68-c36893aac01b/reports/2ba857e0-e07f-4475-81c4-427cbd95cd9e/7189e1e33053e4e12a7c?experience=power-bi^&clientSideAuth=0 && set CYGNUS_WORKSPACE_URL=https://app.powerbi.com/groups/3f3f8c93-4762-459f-8b68-c36893aac01b/list?experience=power-bi^&clientSideAuth=0^&subfolderId=81740 && set CYGNUS_DATASET_ID=fbb612a3-0d0f-43c8-b2a7-317d8d59d423 && set CYGNUS_RLS_ROLE= && set CYGNUS_TARGET_PAGES_JSON= && set PowerBIWorkspaceId= && set PowerBIReportId= && set CYGNUS_GROUP_ID= && set CYGNUS_REPORT_ID= && C:\\Progra~1\\nodejs\\npm.cmd run main:run"
+			],
+			"isBackground": false
+		}
+	]
+}
