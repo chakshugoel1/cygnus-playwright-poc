@@ -3,161 +3,366 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Validation Script Runner</title>
+  <title>Power BI Report Validator</title>
   <style>
     :root {
-      --bg: #f7f9fc;
+      --bg: #f6f8fb;
       --card: #ffffff;
       --ink: #1b2535;
-      --muted: #637189;
+      --muted: #66738a;
+      --faint: #97a2b5;
       --accent: #0f766e;
       --accent-2: #155e75;
-      --border: #d6deea;
+      --border: #dde4ee;
+      --border-soft: #eaeff6;
       --danger: #b42318;
+      --warn-bg: #fdf1e0;
+      --warn-ink: #92600a;
+      --space-1: 4px;
+      --space-2: 8px;
+      --space-3: 12px;
+      --space-4: 16px;
+      --space-5: 24px;
+      --space-6: 32px;
+      --radius: 10px;
+      --radius-sm: 7px;
     }
+
     * { box-sizing: border-box; }
+
     body {
       margin: 0;
       font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
-      background: radial-gradient(circle at top right, #e7f5f3 0%, var(--bg) 55%);
+      background: var(--bg);
       color: var(--ink);
+      font-size: 14px;
+      line-height: 1.45;
     }
+
     .app {
-      max-width: 1100px;
+      max-width: 1080px;
       margin: 0 auto;
-      padding: 20px;
+      padding: var(--space-5) var(--space-4) var(--space-6);
       display: grid;
-      gap: 16px;
+      gap: var(--space-4);
     }
+
+    /* ── Header ─────────────────────────────────────────────────────────── */
+    .app-header {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: var(--space-3);
+      padding-bottom: var(--space-2);
+    }
+    .app-header h1 {
+      margin: 0;
+      font-size: 19px;
+      font-weight: 600;
+      letter-spacing: 0.1px;
+    }
+    .app-header .tag {
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.4px;
+      text-transform: uppercase;
+      color: var(--faint);
+    }
+
+    /* ── Cards ──────────────────────────────────────────────────────────── */
     .card {
       background: var(--card);
       border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 14px;
-      box-shadow: 0 6px 24px rgba(15, 23, 42, 0.07);
+      border-radius: var(--radius);
+      padding: var(--space-4);
     }
-    h1 {
-      margin: 0;
-      font-size: 24px;
-      letter-spacing: 0.2px;
+    .card > * + * { margin-top: var(--space-3); }
+
+    .card-title {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--ink);
+      display: flex;
+      align-items: center;
+      gap: var(--space-2);
     }
-    .sub {
-      margin-top: 6px;
-      color: var(--muted);
-      font-size: 14px;
+    .card-title .step {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: var(--accent);
+      color: #fff;
+      font-size: 10px;
+      font-weight: 700;
+      flex: none;
     }
+
+    /* ── Identity fields ────────────────────────────────────────────────── */
     .grid {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 12px;
+      gap: var(--space-4);
+    }
+    .grid-label {
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.3px;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: var(--space-2);
     }
     .fields {
       display: grid;
-      gap: 10px;
+      gap: var(--space-2);
     }
     .row {
       display: grid;
       grid-template-columns: 1fr 1fr;
-      gap: 10px;
-      align-items: start;
+      gap: var(--space-3);
+      align-items: center;
     }
-    .field-wrap {
-      display: grid;
-      gap: 4px;
+    .field-wrap { min-width: 0; }
+    label {
+      font-size: 12px;
+      color: var(--muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
-    label { font-size: 13px; color: var(--muted); }
+
     input {
       width: 100%;
       border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 8px 10px;
+      border-radius: var(--radius-sm);
+      padding: 7px 10px;
       font-size: 13px;
+      font-family: inherit;
       color: var(--ink);
       background: #fff;
     }
-    input:focus { outline: 2px solid rgba(15, 118, 110, 0.2); border-color: var(--accent); }
-    .section-title { font-weight: 600; margin-bottom: 8px; }
-    .note { font-size: 12px; color: var(--muted); }
-    .danger { color: var(--danger); }
+    input::placeholder { color: var(--faint); }
+    input:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.12);
+    }
+
+    hr.divider {
+      border: none;
+      border-top: 1px solid var(--border-soft);
+      margin: var(--space-3) 0 0;
+    }
+
+    .note {
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .option-toggle {
+      display: flex;
+      align-items: flex-start;
+      gap: var(--space-2);
+      font-size: 12px;
+      color: var(--muted);
+      margin-top: var(--space-1);
+    }
+    .option-toggle input[type="checkbox"] {
+      width: auto;
+      margin-top: 2px;
+      accent-color: var(--accent);
+      box-shadow: none;
+    }
+    .option-toggle label {
+      white-space: normal;
+      overflow: visible;
+      text-overflow: clip;
+      display: inline;
+      cursor: pointer;
+    }
+
+    /* ── Buttons ────────────────────────────────────────────────────────── */
     .actions {
       display: flex;
-      gap: 10px;
+      gap: var(--space-2);
       flex-wrap: wrap;
     }
     button {
       border: none;
-      border-radius: 8px;
-      padding: 9px 14px;
+      border-radius: var(--radius-sm);
+      padding: 8px 14px;
       font-size: 13px;
+      font-weight: 500;
+      font-family: inherit;
       color: #fff;
-      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      background: var(--accent);
       cursor: pointer;
+      transition: opacity 0.12s ease;
     }
-    button.secondary { background: #334155; }
-    button:disabled { opacity: 0.55; cursor: not-allowed; }
+    button:hover:not(:disabled) { opacity: 0.92; }
+    button.secondary { background: #384454; }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+    button:focus-visible {
+      outline: 2px solid var(--accent-2);
+      outline-offset: 2px;
+    }
+
     .status {
-      font-size: 13px;
+      font-size: 12px;
       font-weight: 600;
       color: var(--accent-2);
     }
+
     #log {
-      margin-top: 8px;
       background: #0f172a;
-      color: #d1f9f3;
-      border-radius: 8px;
-      min-height: 300px;
+      color: #cdf3ec;
+      border-radius: var(--radius-sm);
+      min-height: 260px;
       max-height: 420px;
       overflow: auto;
       font-family: Consolas, "Courier New", monospace;
       font-size: 12px;
-      padding: 10px;
-      line-height: 1.4;
+      padding: var(--space-3);
+      line-height: 1.5;
       white-space: pre-wrap;
     }
-    @media (max-width: 860px) {
+
+    /* ── Filters / discovery results ───────────────────────────────────── */
+    .section-title {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--muted);
+    }
+
+    .discover-page {
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: var(--space-3);
+    }
+    .discover-page + .discover-page { margin-top: var(--space-2); }
+    .discover-page h3 {
+      margin: 0 0 var(--space-2) 0;
+      font-size: 13px;
+      font-weight: 600;
+    }
+    .discover-slicer {
+      font-size: 12px;
+      padding: var(--space-2) 0;
+      border-top: 1px solid var(--border-soft);
+      display: flex;
+      justify-content: space-between;
+      gap: var(--space-3);
+    }
+    .discover-slicer:first-child { border-top: none; padding-top: 0; }
+    .discover-slicer .name { color: var(--ink); }
+    .discover-slicer .meta { color: var(--muted); text-align: right; }
+
+    .badge {
+      display: inline-block;
+      font-size: 10px;
+      font-weight: 600;
+      padding: 2px 7px;
+      border-radius: 999px;
+      background: #e7f5f3;
+      color: var(--accent-2);
+      margin-left: var(--space-2);
+    }
+    .badge.hierarchy { background: var(--warn-bg); color: var(--warn-ink); }
+
+    .placeholder {
+      font-size: 12px;
+      color: var(--faint);
+      padding: var(--space-2) 0;
+    }
+
+    @media (max-width: 820px) {
       .grid { grid-template-columns: 1fr; }
-      .row { grid-template-columns: 1fr; gap: 6px; }
+      .row { grid-template-columns: 1fr; gap: var(--space-1); }
+      label { white-space: normal; }
     }
   </style>
 </head>
 <body>
   <div class="app">
-    <div class="card">
-      <h1>Validation Script Runner</h1>
-      <div class="sub">Runs your existing scripts without changing login handling.</div>
+
+    <div class="app-header">
+      <h1>Power BI Report Validator</h1>
+      <span class="tag">Import mode vs Direct Lake</span>
     </div>
 
     <div class="card">
+      <div class="card-title"><span class="step">1</span>Report identities</div>
       <div class="grid">
         <div>
-          <div class="section-title">Source Report (Expected)</div>
+          <div class="grid-label">Source · Expected</div>
           <div class="fields" id="source-fields"></div>
         </div>
         <div>
-          <div class="section-title">Target Report (Actual)</div>
+          <div class="grid-label">Target · Actual</div>
           <div class="fields" id="target-fields"></div>
         </div>
       </div>
-      <div style="margin-top:10px" class="fields">
+      <hr class="divider" />
+      <div class="fields">
         <div class="row">
-          <div class="field-wrap">
-            <label for="pairName">Pair Name</label>
-          </div>
-          <input id="pairName" value="" placeholder="Enter pair name" />
+          <div class="field-wrap"><label for="pairName">Pair name</label></div>
+          <input id="pairName" placeholder=" Ex- Cygnus" />
         </div>
-        <div class="row"><label for="pagesCsv">Pages CSV (optional)</label><input id="pagesCsv" placeholder="Employee, Manager, DU Head, CXO" /></div>
+        <div class="row">
+          <div class="field-wrap"><label for="pagesCsv">Pages (optional)</label></div>
+          <input id="pagesCsv" placeholder=" Ex- Employee, Manager, DU Head, CXO" />
+        </div>
+      </div>
+      <div class="note">Leave pages blank to run every page in the report. This list also scopes which pages "Discover Filters" crawls.</div>
+      <div class="option-toggle">
+        <input type="checkbox" id="applyGlobalFlatFilters" />
+        <label for="applyGlobalFlatFilters">
+          Apply discovered flat filters to all report pages (hierarchy filters stay page-specific).
+        </label>
+      </div>
+      <div class="option-toggle">
+        <input type="checkbox" id="lenientTextCompare" />
+        <label for="lenientTextCompare">
+          Lenient text compare: treat case/space/underscore/hyphen differences as equal in parity compare.
+        </label>
+      </div>
+      <div class="note">
+        Caution: lenient mode may hide real differences when labels/IDs differ only by case or separators.
       </div>
     </div>
 
     <div class="card">
+      <div class="card-title"><span class="step">2</span>Run</div>
       <div class="actions">
-        <button id="btnSetup" class="secondary">Run Auth Setup Only</button>
-        <button id="btnParity">Run Parity Only</button>
-        <button id="btnBoth">Run Auth Setup + Parity</button>
+        <button id="btnSetup" class="secondary">Run Authentication</button>
+        <button id="btnParity">Run Parity</button>
+        <button id="btnBoth">Run Auth + Parity</button>
       </div>
-      <div style="margin-top:10px" class="status" id="status">State: Idle</div>
+      <div class="status" id="status">State: Idle</div>
       <div id="log"></div>
     </div>
+
+    <div class="card">
+      <div class="card-title"><span class="step">3</span>Filters</div>
+      <div class="note">
+        Discovering is read-only. Values you pick below apply on your next Run Parity.
+      </div>
+      <div class="actions">
+        <button id="btnDiscover" class="secondary">Discover Filters</button>
+      </div>
+      <div id="globalFiltersResult">
+        <div class="placeholder">No global filters checked yet.</div>
+      </div>
+      <div id="pageScopeResult">
+        <div class="placeholder">Run Discover once to load report pages. Selected pages here will be used for all slicers.</div>
+      </div>
+      <div id="discoverResults">
+        <div class="placeholder">No slicers discovered yet — select pages to crawl above, then click Discover Filters.</div>
+      </div>
+    </div>
+
   </div>
 
   <script src="./app.js"></script>

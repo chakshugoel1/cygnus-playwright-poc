@@ -87,24 +87,24 @@ export type RunMode = 'both' | 'source' | 'target';
  */
 export const PAIRS: ReportPair[] = [
   {
-    name: 'Cygnus',
+    name: 'Power BI Report',
     // Import mode (EXPECTED) — current Cygnus report.
     source: {
-      tenantId:  '8b87af7d-8647-4dc7-8df4-5f69a2011bb5',
-      groupId:   '087ae424-1e86-4979-b65c-f2f610aeb5a7',
-      reportId:  'a2a92634-3f0a-437a-ac86-c332a2eac7de',
-      datasetId: '050de212-5f33-4beb-8a6f-8f64b3f2fccd',
-      rlsRole:   'DynamicRoles',
+      tenantId:  '',
+      groupId:   '',
+      reportId:  '',
+      datasetId: '',
+      rlsRole:   '',
     },
     // Direct Lake (ACTUAL) — FILL THESE IN with the migrated report's IDs.
     target: {
-      tenantId:  '8b87af7d-8647-4dc7-8df4-5f69a2011bb5',
-      groupId:   '087ae424-1e86-4979-b65c-f2f610aeb5a7',
-      reportId:  'a2a92634-3f0a-437a-ac86-c332a2eac7de',
-      datasetId: '050de212-5f33-4beb-8a6f-8f64b3f2fccd',
-      rlsRole:   'DynamicRoles',
+      tenantId:  '',
+      groupId:   '',
+      reportId:  '',
+      datasetId: '',
+      rlsRole:   '',
     },
-     pages: ['Employee', 'Manager', 'DU Head', 'CXO'],   // optional: only these tabs
+     pages: ['CXO'],   // optional: only these tabs
     // pageMap: { 'DU Head': 'DU-Head' }, // optional: renamed tabs
   },
 ];
