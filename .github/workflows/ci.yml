@@ -1,0 +1,43 @@
+name: CI
+
+# Fast, browser-free gate: type-check the whole project and run the pure-logic
+# unit tests. Deliberately does NOT run the Power BI flows (parity / main-run /
+# discover) — those need real credentials, a live report, and a browser, none of
+# which belong in (or can safely run in) public CI. This catches the things that
+# CAN be caught cheaply: type errors, syntax breakage, and regressions in the
+# logic-dense helpers (filter planning, scenario validation).
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  typecheck-and-unit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type-check (tsc --noEmit)
+        run: npm run typecheck
+
+      # The unit project is browser-free, but `playwright test` still expects a
+      # browser binary to exist for OTHER projects it discovers. Install just
+      # chromium (with its OS deps) so the runner starts cleanly; the unit tests
+      # themselves never launch it.
+      - name: Install Playwright browser (chromium)
+        run: npx playwright install --with-deps chromium
+
+      - name: Unit tests
+        run: npm run test:unit

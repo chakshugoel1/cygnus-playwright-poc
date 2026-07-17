@@ -5,14 +5,20 @@
   "main": "index.js",
   "scripts": {
     "test": "npx playwright test",
+    "test:unit": "npx playwright test --project=unit --reporter=list",
+    "typecheck": "tsc --noEmit",
     "test:setup": "npx playwright test --project=setup",
     "main:run": "npx playwright test --project=main-run --reporter=list,html --no-deps --grep \"Cygnus Main Run\"",
     "compare:excel": "npx playwright test --project=compare-excel --reporter=list --no-deps",
+    "discover:slicers": "npx playwright test --project=discover-slicers --reporter=list --no-deps",
     "parity": "node scripts/run-parity.js both",
     "parity:source": "node scripts/run-parity.js source",
     "parity:target": "node scripts/run-parity.js target",
     "show:report": "npx playwright show-report",
-    "install-browsers": "npx playwright install chromium"
+    "install-browsers": "npx playwright install chromium",
+    "install:setup": "powershell -NoProfile -ExecutionPolicy Bypass -File ./install.ps1",
+    "install:verify": "powershell -NoProfile -ExecutionPolicy Bypass -File ./install.ps1 -Mode verify",
+    "install:fast": "powershell -NoProfile -ExecutionPolicy Bypass -File ./install.ps1 -Mode fast"
   },
   "keywords": [],
   "author": "",
@@ -21,7 +27,8 @@
   "devDependencies": {
     "@playwright/test": "^1.60.0",
     "@types/node": "^25.9.1",
-    "powerbi-client": "^2.23.1"
+    "powerbi-client": "^2.23.1",
+    "typescript": "^5.9.2"
   },
   "dependencies": {
     "dotenv": "^17.4.2",
