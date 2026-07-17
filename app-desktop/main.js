@@ -31,6 +31,9 @@ function findWorkspaceRoot() {
 const WORKSPACE_ROOT = findWorkspaceRoot();
 const RUNTIME_DIR = path.join(WORKSPACE_ROOT, '.runtime');
 const RUNTIME_FILE = path.join(RUNTIME_DIR, 'parity-runtime-config.json');
+// Separate file from RUNTIME_FILE (parity's) so a Discover run never clobbers
+// an in-progress/just-used Parity config, or vice versa.
+const DISCOVER_RUNTIME_FILE = path.join(RUNTIME_DIR, 'discover-runtime-config.json');
 
 let mainWindow = null;
 let isRunning = false;
@@ -183,12 +186,80 @@ async function runSetup() {
 async function runParity(config) {
   const runtimeConfigPath = writeRuntimeConfig(config);
   emitLog(`[desktop-runner] Runtime parity config written: ${runtimeConfigPath}`);
-  emitLog('[desktop-runner] Starting parity via npm run parity');
 
-  await runScript('parity', {
+  const extraEnv = {
     CYGNUS_UI_RUNTIME_OVERRIDE: '1',
     CYGNUS_UI_RUNTIME_CONFIG_PATH: runtimeConfigPath,
-  }, 'parity');
+  };
+
+  if (config.slicerScenario && Object.keys(config.slicerScenario.pages || {}).length > 0) {
+    ensureRuntimeDir();
+    const scenarioPath = path.join(RUNTIME_DIR, 'slicer-scenario.json');
+    fs.writeFileSync(scenarioPath, JSON.stringify({ scenarios: [config.slicerScenario] }, null, 2), 'utf8');
+    emitLog(`[desktop-runner] Filter scenario written: ${scenarioPath}`);
+    extraEnv.CYGNUS_SLICER_OVERRIDE = '1';
+    extraEnv.CYGNUS_SLICER_CONFIG_PATH = scenarioPath;
+  }
+
+  if (config.applyGlobalFlatFilters) {
+    extraEnv.CYGNUS_SLICER_GLOBAL_FILTERS = '1';
+    emitLog('[desktop-runner] Flat field filters will be applied at report level (all pages).');
+  }
+
+  if (config.lenientTextCompare) {
+    extraEnv.CYGNUS_COMPARE_TEXT_LENIENT = '1';
+    emitLog('[desktop-runner] Lenient text compare enabled.');
+  } else {
+    extraEnv.CYGNUS_COMPARE_TEXT_LENIENT = '0';
+  }
+
+  emitLog('[desktop-runner] Starting parity via npm run parity');
+  await runScript('parity', extraEnv, 'parity');
+}
+
+async function runDiscoverSlicers(pairName, pagesCsv, identity, side) {
+  emitLog('[desktop-runner] Starting discovery via npm run discover:slicers');
+  const extraEnv = {};
+
+  if (identity) {
+    // Mirrors runParity()'s override mechanism: point comparison-config's
+    // getActivePair() at the report entered in the UI instead of the
+    // hardcoded PAIRS[0] entry in comparison-config.helpers.ts. The runtime
+    // loader requires BOTH source and target to be present (see
+    // readRuntimeParityConfig) even though discovery only ever reads ONE side
+    // — the other side is a harmless placeholder here, discovery never
+    // touches it.
+    ensureRuntimeDir();
+    const payload = {
+      pairName: (pairName || 'Cygnus').trim(),
+      source: identity,
+      target: identity,
+    };
+    fs.writeFileSync(DISCOVER_RUNTIME_FILE, JSON.stringify(payload, null, 2), 'utf8');
+    extraEnv.CYGNUS_UI_RUNTIME_OVERRIDE = '1';
+    extraEnv.CYGNUS_UI_RUNTIME_CONFIG_PATH = DISCOVER_RUNTIME_FILE;
+    extraEnv.DISCOVER_SIDE = side === 'target' ? 'target' : 'source';
+    emitLog(`[desktop-runner]   report: using ${side === 'target' ? 'Target' : 'Source'} fields entered in the UI (tenant ${identity.tenantId})`);
+  } else {
+    emitLog('[desktop-runner]   report: using the pair hardcoded in comparison-config.helpers.ts (no identity entered in the UI)');
+  }
+
+  const pages = (pagesCsv || '').trim();
+  if (pages) {
+    extraEnv.DISCOVER_PAGES = pages;
+    emitLog(`[desktop-runner]   scope: pages [${pages}]`);
+  } else {
+    emitLog('[desktop-runner]   scope: global check only (no pages named — add pages to also crawl them)');
+  }
+  await runScript('discover:slicers', extraEnv, 'discover:slicers');
+
+  const resolvedPairName = (pairName || 'Cygnus').trim();
+  const resultPath = path.join(WORKSPACE_ROOT, 'playwright-report-parity', resolvedPairName, 'discovered-slicers.json');
+  if (!fs.existsSync(resultPath)) {
+    throw new Error(`Discovery finished but no results file was found at ${resultPath}. Check the pair name matches your comparison-config.helpers.ts.`);
+  }
+  const raw = fs.readFileSync(resultPath, 'utf8');
+  return JSON.parse(raw);
 }
 
 function createWindow() {
@@ -222,6 +293,16 @@ ipcMain.handle('run-parity', async (_event, config) => {
     return { ok: true };
   } catch (e) {
     emitLog(`[desktop-runner] Parity error: ${e.message}`);
+    return { ok: false, error: e.message };
+  }
+});
+
+ipcMain.handle('run-discover-slicers', async (_event, pairName, pagesCsv, identity, side) => {
+  try {
+    const result = await runDiscoverSlicers(pairName, pagesCsv, identity, side);
+    return { ok: true, result };
+  } catch (e) {
+    emitLog(`[desktop-runner] Discover error: ${e.message}`);
     return { ok: false, error: e.message };
   }
 });

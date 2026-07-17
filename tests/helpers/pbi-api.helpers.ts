@@ -404,6 +404,33 @@ export async function extractUserTokenFromBrowser(page: Page): Promise<string | 
   });
 }
 
+const DEFAULT_TOKEN_POLL_TIMEOUT_MS = 30_000;
+const TOKEN_POLL_INTERVAL_MS        = 2_000;
+
+/**
+ * Polls extractUserTokenFromBrowser() every TOKEN_POLL_INTERVAL_MS until a
+ * token is found or the timeout elapses. Shared by report-parity.spec.ts and
+ * discover-slicers.spec.ts, which both need this exact loop after navigating
+ * to app.powerbi.com and waiting for its authenticated calls to fire.
+ *
+ * Timeout defaults to CYGNUS_TOKEN_TIMEOUT_MS (env) or 30s — configurable
+ * since a slow network/tenant can legitimately take longer than a fixed
+ * ceiling to fire MSAL's token acquisition.
+ */
+export async function pollForUserToken(page: Page, timeoutMs?: number): Promise<string | null> {
+  const ceiling = timeoutMs ?? (Number(process.env['CYGNUS_TOKEN_TIMEOUT_MS']) || DEFAULT_TOKEN_POLL_TIMEOUT_MS);
+  let token: string | null = null;
+  const pollStart = Date.now();
+  while (!token && Date.now() - pollStart < ceiling) {
+    token = await extractUserTokenFromBrowser(page);
+    if (!token) {
+      console.log(`    ⏳ Token not yet captured — waiting ${TOKEN_POLL_INTERVAL_MS / 1000}s...`);
+      await page.waitForTimeout(TOKEN_POLL_INTERVAL_MS);
+    }
+  }
+  return token;
+}
+
 /**
  * Runs a DAX query using the signed-in user's token extracted from the browser.
  * Use this when Application permissions are unavailable (Delegated-only setup).
