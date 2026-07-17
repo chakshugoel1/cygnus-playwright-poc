@@ -9,6 +9,90 @@ mode** to **Direct Lake** still shows the same data.
 
 ## 1. First-Time Setup Guide
 
+### One-command installer (recommended)
+
+### One file, double-click (new machine, easiest)
+
+Share **`bootstrap.cmd`** (email it, Teams/Slack it, drop it on a shared
+drive — it's a single standalone file, the rest of the repo doesn't need to
+be there yet). On the new machine, double-click it. It downloads the
+installer and runs it, which:
+- clones/updates the repo to `%USERPROFILE%\cygnus-playwright-poc`
+- runs `install.ps1` automatically
+
+A console window opens so you can watch progress and answer the credential
+prompts; it stays open at the end so you can read the result before closing.
+If something fails partway, fix the reported issue and double-click it again
+— steps already completed are skipped.
+
+### One link / bootstrap command (alternative — if you'd rather paste a command)
+
+If the machine does not even have the repo yet, share this single command:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$u='https://raw.githubusercontent.com/chakshugoel1/cygnus-playwright-poc/master/bootstrap-install.ps1'; $p=Join-Path $env:TEMP 'bootstrap-install.ps1'; iwr -UseBasicParsing $u -OutFile $p; powershell -NoProfile -ExecutionPolicy Bypass -File $p"
+```
+
+What this does:
+- clones/updates the repo to `%USERPROFILE%\\cygnus-playwright-poc`
+- runs `install.ps1` automatically
+
+Optional example (skip parity smoke check):
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$u='https://raw.githubusercontent.com/chakshugoel1/cygnus-playwright-poc/master/bootstrap-install.ps1'; $p=Join-Path $env:TEMP 'bootstrap-install.ps1'; iwr -UseBasicParsing $u -OutFile $p; powershell -NoProfile -ExecutionPolicy Bypass -File $p -SkipParity"
+```
+
+If your org blocks `Invoke-WebRequest`, copy `bootstrap-install.ps1` (or
+`bootstrap.cmd`, which needs no arguments) to the new machine and run it
+directly.
+
+> **First-run security prompt:** since both files are downloaded from the
+> internet, Windows SmartScreen will show "Windows protected your PC" the
+> first time you run either one. Click **More info → Run anyway** — this is
+> normal for any unsigned script/file shared outside the Microsoft Store, not
+> a sign something is wrong.
+
+For a fresh machine, run from repo root:
+
+```powershell
+.\install.ps1
+```
+
+Or if script execution is blocked:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+What it does in phase 1:
+- checks/installs Node LTS and Git via `winget` (if missing)
+- installs root npm dependencies
+- installs Playwright Chromium
+- creates `%USERPROFILE%\.askme-poc-secrets`
+- creates `%USERPROFILE%\.askme-poc-secrets\.env` and `pbi-service-principal.json` from templates if missing
+- runs `npm run test:setup` once if credentials exist and auth session is missing
+- runs `npm run parity` as a smoke check (unless skipped)
+- optionally installs `app-desktop` dependencies
+
+Useful installer modes:
+
+```powershell
+.\install.ps1 -Mode verify            # check-only, no installs/changes
+.\install.ps1 -Mode fast              # skips npm install/browsers/parity
+.\install.ps1 -Mode full -SkipParity  # full setup but skip parity smoke check
+```
+
+NPM shortcuts:
+
+```powershell
+npm run install:setup
+npm run install:verify
+npm run install:fast
+```
+
+---
+
 Follow these steps in order the first time you set this project up on a machine.
 Steps 5–6 (credentials) only need to be done once per machine, not once per run.
 
