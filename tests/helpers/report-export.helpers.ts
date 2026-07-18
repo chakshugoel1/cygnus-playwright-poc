@@ -90,6 +90,48 @@ export interface ReportExportResult {
   pagesFound:  ReportPage[];
   exported:    PageExportResult[];
   outPath:     string;
+  /** pagesFilter entries that matched NO page in this report — a strong sign
+   *  the two sides' page names have drifted (renamed/removed pages). */
+  requestedPagesMissing: string[];
+}
+
+/** Trim + case-insensitive canonical form for page display names. Migrated
+ *  reports drift in exactly these ways ("Vertragsversand " with a trailing
+ *  space, "- Cluster" vs "- cluster") while still being the same page. */
+export function pageNameKey(name: string): string {
+  return name.trim().toLowerCase();
+}
+
+/**
+ * Pure page-set alignment between a source and target report, for the parity
+ * summary. `pageMap` (source name → target name) is applied before matching;
+ * names are matched trimmed + case-insensitively.
+ */
+export function diffPageSets(
+  sourcePages: string[],
+  targetPages: string[],
+  pageMap?: Record<string, string>,
+): { inBoth: string[]; onlyInSource: string[]; onlyInTarget: string[] } {
+  const mapByKey = new Map(Object.entries(pageMap ?? {}).map(([s, t]) => [pageNameKey(s), t]));
+  const targetKeys = new Set(targetPages.map(pageNameKey));
+
+  const inBoth: string[] = [];
+  const onlyInSource: string[] = [];
+  const matchedTargetKeys = new Set<string>();
+
+  for (const src of sourcePages) {
+    const mapped = mapByKey.get(pageNameKey(src)) ?? src;
+    const key = pageNameKey(mapped);
+    if (targetKeys.has(key)) {
+      inBoth.push(src);
+      matchedTargetKeys.add(key);
+    } else {
+      onlyInSource.push(src);
+    }
+  }
+
+  const onlyInTarget = targetPages.filter(t => !matchedTargetKeys.has(pageNameKey(t)));
+  return { inBoth, onlyInSource, onlyInTarget };
 }
 
 export interface ExportOptions {
@@ -154,16 +196,18 @@ export async function exportReportToWorkbook(
   const pagesFound = await getReportPages(page);
   console.log(`[export:${label}] Report has ${pagesFound.length} page(s): ${pagesFound.map(p => p.displayName).join(' | ')}`);
 
-  // Select pages: filtered subset (by display name) or all.
+  // Select pages: filtered subset (by display name, trimmed + case-insensitive
+  // — migrated reports drift by trailing spaces and case) or all.
   let selected: ReportPage[];
+  let requestedPagesMissing: string[] = [];
   if (options.pagesFilter && options.pagesFilter.length > 0) {
-    const wanted = options.pagesFilter.map(s => s.toLowerCase());
-    selected = pagesFound.filter(p => wanted.includes(p.displayName.toLowerCase()));
-    const missing = options.pagesFilter.filter(
-      w => !pagesFound.some(p => p.displayName.toLowerCase() === w.toLowerCase()),
+    const wanted = options.pagesFilter.map(pageNameKey);
+    selected = pagesFound.filter(p => wanted.includes(pageNameKey(p.displayName)));
+    requestedPagesMissing = options.pagesFilter.filter(
+      w => !pagesFound.some(p => pageNameKey(p.displayName) === pageNameKey(w)),
     );
-    if (missing.length > 0) {
-      console.warn(`[export:${label}] Requested pages not found in report: ${missing.join(', ')}`);
+    if (requestedPagesMissing.length > 0) {
+      console.warn(`[export:${label}] Requested pages not found in report: ${requestedPagesMissing.join(', ')}`);
     }
   } else {
     selected = pagesFound;
@@ -273,7 +317,7 @@ export async function exportReportToWorkbook(
   const grandRows = exported.reduce((s, e) => s + e.totalRows, 0);
   console.log(`[export:${label}] Wrote ${exported.length} sheet(s), ${grandRows} data row(s) → ${options.outPath}`);
 
-  return { pagesFound, exported, outPath: options.outPath };
+  return { pagesFound, exported, outPath: options.outPath, requestedPagesMissing };
 }
 
 // ── Column width bounds (characters) ───────────────────────────────────────
@@ -399,6 +443,16 @@ export interface ParitySummaryMeta {
   targetReportId: string;
   expectedFile: string;
   actualFile:   string;
+  /**
+   * Problems that make the comparison itself untrustworthy (a filter that
+   * applied on one side but failed on the other, requested pages missing on
+   * one side, etc). Any entry here FORCES the verdict to a non-pass — a
+   * filtered-vs-unfiltered comparison must never present itself as a clean
+   * result, pass OR fail.
+   */
+  comparisonCaveats?: string[];
+  /** Full page-set alignment between the two reports (informational). */
+  pageAlignment?: { onlyInSource: string[]; onlyInTarget: string[]; inBothCount: number };
 }
 
 /**
@@ -463,7 +517,12 @@ export async function writeParitySummary(
   meta: ParitySummaryMeta,
   outPath: string,
 ): Promise<{ passed: boolean; differingSheets: number }> {
-  const passed = TREAT_HEADER_DIFF_AS_FAILURE ? diff.identical : diff.dataIdentical;
+  const caveats = meta.comparisonCaveats ?? [];
+  const dataPassed = TREAT_HEADER_DIFF_AS_FAILURE ? diff.identical : diff.dataIdentical;
+  // Caveats override everything: a run where the two sides weren't filtered
+  // identically (or pages went missing) is NOT comparable, so neither a green
+  // PASS nor a plain FAIL would be honest.
+  const passed = dataPassed && caveats.length === 0;
   const differing = diff.sheets.filter(s => TREAT_HEADER_DIFF_AS_FAILURE ? !s.identical : !s.dataIdentical).length;
 
   const totalHeaderDiffs = diff.sheets.reduce((s, sh) => s + sh.headerDiffCount, 0);
@@ -476,9 +535,11 @@ export async function writeParitySummary(
   // ── Sheet 1: Summary ──────────────────────────────────────────────────────
   const infoWs = wb.addWorksheet('Parity Summary');
   infoWs.columns = [{ width: 30 }, { width: 60 }];
-  const verdict = passed
-    ? '✅ PASS — source and target data match'
-    : `❌ FAIL — ${differing} page(s) have genuine data/structure differences`;
+  const verdict = caveats.length > 0
+    ? `⚠️ NOT COMPARABLE — ${caveats.length} caveat(s) invalidate this run (see Caveat rows below)`
+    : passed
+      ? '✅ PASS — source and target data match'
+      : `❌ FAIL — ${differing} page(s) have genuine data/structure differences`;
   const rows: [string, string][] = [
     ['Pair',                meta.pairName],
     ['Run Mode',            meta.mode],
@@ -496,17 +557,23 @@ export async function writeParitySummary(
     ['Header-Only Visual Diffs (see Visual Comparison)', String(totalHeaderDiffs)],
     ['Structural Visual Diffs — missing/duplicated/ambiguous (see Visual Comparison)', String(totalStructuralDiffs)],
     ['Header diffs count as failure?', TREAT_HEADER_DIFF_AS_FAILURE ? 'Yes' : 'No — see TREAT_HEADER_DIFF_AS_FAILURE'],
-    ['Overall Result',      verdict],
   ];
+  if (meta.pageAlignment) {
+    rows.push(['Report Pages In Both Reports', String(meta.pageAlignment.inBothCount)]);
+    rows.push(['Report Pages Only In Source Report', meta.pageAlignment.onlyInSource.join(', ') || '(none)']);
+    rows.push(['Report Pages Only In Target Report', meta.pageAlignment.onlyInTarget.join(', ') || '(none)']);
+  }
+  caveats.forEach((c, i) => rows.push([`⚠ Caveat ${i + 1}`, c]));
+  rows.push(['Overall Result', verdict]);
   rows.forEach(([label, value]) => {
     const r = infoWs.addRow([label, value]);
     r.getCell(1).font = { bold: true };
-    r.getCell(1).fill = E_INFO;
+    r.getCell(1).fill = label.startsWith('⚠ Caveat') ? E_WARN : E_INFO;
     r.eachCell(c => { c.border = E_CB; c.alignment = { vertical: 'middle', wrapText: true }; });
   });
   const verdictRow = infoWs.getRow(rows.length);
-  verdictRow.getCell(2).fill = passed ? E_PASS : E_FAIL;
-  verdictRow.getCell(2).font = { bold: true, color: { argb: 'FFFFFFFF' } };
+  verdictRow.getCell(2).fill = caveats.length > 0 ? E_WARN : (passed ? E_PASS : E_FAIL);
+  verdictRow.getCell(2).font = { bold: true, color: { argb: caveats.length > 0 ? 'FF000000' : 'FFFFFFFF' } };
 
   // ── Sheet 2: Page Comparison ──────────────────────────────────────────────
   const cmpWs = wb.addWorksheet('Page Comparison');

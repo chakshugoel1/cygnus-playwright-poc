@@ -244,8 +244,11 @@ export function hasScenarios(): boolean {
  * FilterApplicationPlan's perPage map, which has the exact same shape/risk.
  */
 export function getForPageCI<T>(record: Record<string, T[]>, pageDisplayName: string): T[] {
-  const wanted = pageDisplayName.toLowerCase();
-  const key = Object.keys(record).find(k => k.toLowerCase() === wanted);
+  // Trimmed as well as case-insensitive: real reports have been seen with a
+  // trailing space in a page name ("Vertragsversand ") that its migrated
+  // counterpart lacks — same page, must still match.
+  const wanted = pageDisplayName.trim().toLowerCase();
+  const key = Object.keys(record).find(k => k.trim().toLowerCase() === wanted);
   return key ? record[key] : [];
 }
 

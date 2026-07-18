@@ -120,7 +120,7 @@ function resolveTargetPages(allPages: ReportPage[]): ReportPage[] {
     const found: ReportPage[] = [];
     const missing: string[] = [];
     for (const wanted of NAMED_PAGES) {
-      const matches = allPages.filter(p => p.displayName.toLowerCase() === wanted.toLowerCase());
+      const matches = allPages.filter(p => p.displayName.trim().toLowerCase() === wanted.trim().toLowerCase());
       if (matches.length === 0) {
         missing.push(wanted);
       } else {

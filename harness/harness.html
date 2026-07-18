@@ -238,6 +238,14 @@
     // Waits are handled on the Node side (Power BI redraws after this).
     window.__setSlicerSelection = async function(visualName, values, knownIsHierarchy, knownTargets) {
       var slicer = await __findSlicerByName(visualName);
+      if (!slicer) {
+        // Without this guard the failure surfaces as a cryptic "Cannot read
+        // properties of undefined" — say what actually happened. Visual names
+        // are report-specific ids: one discovered on report A does not exist
+        // in report B even when the two reports look identical.
+        throw new Error('Slicer visual "' + visualName + '" was not found on the active page - ' +
+          'visual names are report-specific, so a slicer discovered on one report cannot be applied to a different report.');
+      }
 
       var targets;
       var isHierarchy;
