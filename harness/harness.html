@@ -11,6 +11,14 @@
     __getPages()                   → Promise<Array<{name, displayName}>>
     __setPage(pageName)            → Promise<void>  navigate to a report page by internal name
     __exportPageVisuals()          → Promise<VisualResult[]>  export all visuals on current page
+    __listPageSlicers()            → Promise<SlicerInfo[]>    list slicers on current page (binding + current selection)
+    __setSlicerSelection(name,vals)→ Promise<...>  apply a value selection to a flat slicer
+    __clearSlicerSelection(name)   → Promise<...>  clear a slicer back to "all"
+    __setGlobalFilters(specs)      → Promise<...>  apply Basic filters (array) to ALL pages at once — flat fields only
+    __clearGlobalFilters()         → Promise<...>  clear all report-level filters
+    __getGlobalFilters()           → Promise<...>  read existing report-level filters (fast, no page crawl)
+    __setPageFieldFilters(specs)   → Promise<...>  apply Basic filters (array) to the ACTIVE page only, no visual needed
+    __exportSingleVisual(name)     → Promise<...>  export one visual's data by name (for reading slicer options)
     __rendered                     → boolean  true after first render
     __lastError                    → string | null
 -->
@@ -104,7 +112,9 @@
     window.__getPages = async function() {
       var pages = await window.__report.getPages();
       return pages.map(function(p) {
-        return { name: p.name, displayName: p.displayName };
+        // visibility: 0 = normal/visible, 1 = hidden (e.g. tooltip pages,
+        // drillthrough targets). Callers should skip hidden pages by default.
+        return { name: p.name, displayName: p.displayName, visibility: p.visibility };
       });
     };
 
@@ -115,7 +125,310 @@
       await new Promise(function(r) { setTimeout(r, 4000); });
     };
 
+    // ── Slicer support ───────────────────────────────────────────────────────
+    //
+    // A slicer is just a visual of type "slicer" (or "advancedSlicer" for the
+    // tree/hierarchy style). Power BI exposes getSlicerState()/setSlicerState()
+    // on each slicer visual. State shape (simplified):
+    //   {
+    //     filters: [ { target: {table, column|hierarchy...}, operator, values:[...] } ],
+    //     targets: [ {table, column} | {table, hierarchy, hierarchyLevel} ]
+    //   }
+    // We read `targets` to learn what field(s) the slicer is bound to, and read
+    // the current `filters[].values` to learn what's selected right now. To
+    // discover the AVAILABLE options we don't enumerate the slicer widget (the
+    // SDK doesn't expose that cleanly); instead the Node side exports the slicer
+    // visual's own data via exportData(), which returns its full value list.
+    // That's why discovery pairs __listPageSlicers (here) with a data export.
+
+    function slicerKindFromState(visualType, targets) {
+      // A hierarchy-bound slicer (e.g. BU -> DU -> DU Detail) is frequently
+      // STILL reported as visual type "slicer", not "advancedSlicer" — the
+      // type name alone is not a reliable signal. The real signal is whether
+      // Power BI reports more than one binding level in the slicer's targets.
+      if (visualType === 'advancedSlicer') return 'tree';
+      if (targets && targets.length > 1) return 'tree';
+      return 'flat';
+    }
+
+    // Find a slicer visual on the active page by its Power BI visual name.
+    async function __findSlicerByName(visualName) {
+      var pages   = await window.__report.getPages();
+      var active  = pages.find(function(p) { return p.isActive; }) || pages[0];
+      var visuals = await active.getVisuals();
+      var match = visuals.find(function(v) { return v.name === visualName; });
+      if (!match) {
+        throw new Error('Slicer visual "' + visualName + '" not found on active page');
+      }
+      return match;
+    }
+
+    // List every slicer on the active page, with its binding + current selection.
+    // Does NOT return the full option list — that comes from a data export on
+    // the Node side (see harness.helpers.ts discoverPageSlicers).
+    window.__listPageSlicers = async function() {
+      var pages   = await window.__report.getPages();
+      var active  = pages.find(function(p) { return p.isActive; }) || pages[0];
+      var visuals = await active.getVisuals();
+      var slicers = visuals.filter(function(v) {
+        return v.type === 'slicer' || v.type === 'advancedSlicer';
+      });
+
+      var out = [];
+      for (var i = 0; i < slicers.length; i++) {
+        var v = slicers[i];
+        var entry = {
+          name:      v.name,
+          title:     v.title || '(no title)',
+          type:      v.type,
+          kind:      'flat', // provisional — corrected below once we've read targets
+          targets:   [],
+          selected:  [],
+          errorMessage: null
+        };
+        try {
+          var state = await v.getSlicerState();
+          entry.targets = state.targets || [];
+          entry.kind    = slicerKindFromState(v.type, entry.targets);
+          // Flatten currently-selected values across any filters present.
+          if (state.filters && state.filters.length) {
+            state.filters.forEach(function(f) {
+              if (f.values && f.values.length) {
+                entry.selected = entry.selected.concat(f.values);
+              }
+            });
+          }
+        } catch (e) {
+          entry.errorMessage = (e && e.message) ? e.message : JSON.stringify(e);
+        }
+        out.push(entry);
+      }
+      return out;
+    };
+
+    // Apply a selection to a slicer: values is an array of strings, selected
+    // as an OR (multiple values = "any of these"). Handles BOTH slicer kinds:
+    //   - flat slicer (1 bound target): a Basic filter, as before.
+    //   - hierarchy slicer (2+ bound targets, e.g. BU -> DU -> DU Detail): a
+    //     Hierarchy filter. Power BI rejects a Basic filter on these outright
+    //     (confirmed in practice: "Hierarchy slicer supports only hierarchy
+    //     filter", errorCode invalidHierarchySlicerFilterType) — a Hierarchy
+    //     filter's `target` must be the FULL array of level targets, and
+    //     selection happens via a `hierarchyData` node tree, not a values list.
+    //     Shape confirmed against Microsoft's own powerbi-models test suite
+    //     (slicerValidator.spec.ts), since the npm package doesn't ship this
+    //     type in a discoverable way (missing dist/ in the published package).
+    //
+    // knownIsHierarchy / knownTargets (both optional): pass these when the
+    // caller already knows them from discovery. IMPORTANT — this is not just
+    // an optimization: confirmed in practice that slicer.getSlicerState().
+    // targets can report a DIFFERENT length for the exact same visual between
+    // two separate embed sessions of the exact same report (observed: 3
+    // targets during discovery, 1 target moments later in a fresh parity
+    // embed — same visualName, same report). Re-deriving isHierarchy from a
+    // fresh live query is therefore NOT reliable. When known values are
+    // supplied, they're trusted outright and getSlicerState() is skipped for
+    // this decision entirely. Falls back to live derivation only when the
+    // caller doesn't know (older/other call sites).
+    //
+    //     NOTE: this only selects at the TOP level of the hierarchy (e.g. BU).
+    //     Selecting a specific DU *within* a chosen BU (multi-level selection
+    //     in one call) is not implemented yet — hierarchyData supports it via
+    //     nested `children`, but it needs its own testing before relying on it.
+    // Waits are handled on the Node side (Power BI redraws after this).
+    window.__setSlicerSelection = async function(visualName, values, knownIsHierarchy, knownTargets) {
+      var slicer = await __findSlicerByName(visualName);
+
+      var targets;
+      var isHierarchy;
+      if (Array.isArray(knownTargets) && knownTargets.length > 0) {
+        targets = knownTargets;
+        isHierarchy = (typeof knownIsHierarchy === 'boolean') ? knownIsHierarchy : (targets.length > 1);
+      } else {
+        var state = await slicer.getSlicerState();
+        if (!state.targets || !state.targets.length) {
+          throw new Error('Slicer "' + visualName + '" has no bound target to filter on');
+        }
+        targets = state.targets;
+        isHierarchy = (typeof knownIsHierarchy === 'boolean') ? knownIsHierarchy : (targets.length > 1);
+      }
+
+      var newFilter;
+
+      if (isHierarchy) {
+        newFilter = {
+          $schema:  'http://powerbi.com/product/schema#hierarchy',
+          target:   targets, // ALL levels, in order — required, not just the first
+          filterType: 9,           // models.FilterType.Hierarchy
+          hierarchyData: values.map(function(v) {
+            return { value: v, operator: 'Selected' };
+          }),
+        };
+      } else {
+        newFilter = {
+          $schema:  'http://powerbi.com/product/schema#basic',
+          target:   targets[0],
+          operator: 'In',
+          values:   values,
+          filterType: 1 // models.FilterType.Basic
+        };
+      }
+
+      try {
+        await slicer.setSlicerState({ filters: [newFilter] });
+      } catch (e) {
+        // Power BI SDK errors are often plain objects, not Error instances —
+        // if we just rethrow `e` as-is, Playwright's page.evaluate() may only
+        // be able to serialize it down to the unhelpful string "Object".
+        // Pull out everything readable and build a real Error with it.
+        var raw = '';
+        try { raw = JSON.stringify(e); } catch (_e2) { raw = String(e); }
+        var msg  = (e && e.message) ? e.message : '(no message)';
+        var code = (e && e.errorCode) ? (' errorCode=' + e.errorCode) : '';
+        throw new Error(
+          'setSlicerState failed for "' + visualName + '" ' +
+          '(isHierarchy=' + isHierarchy + ', trusted=' + Array.isArray(knownTargets) + ', filter=' + JSON.stringify(newFilter) + '): ' +
+          msg + code + ' | raw=' + raw
+        );
+      }
+      return { name: visualName, applied: values, isHierarchy: isHierarchy, targets: targets };
+    };
+
+    // Clear a slicer back to "no selection" (all values).
+    window.__clearSlicerSelection = async function(visualName) {
+      var slicer = await __findSlicerByName(visualName);
+      await slicer.setSlicerState({ filters: [] });
+      return { name: visualName, cleared: true };
+    };
+
+    // ── Report-level (global) filtering ─────────────────────────────────────
+    // A Basic filter applied via report.setFilters() affects EVERY page in one
+    // call, instead of applying the same field's slicer once per page. This is
+    // only valid for flat (single-column) fields — Power BI's Hierarchy filter
+    // type is slicer-only and is rejected at the report level, so hierarchy
+    // fields (BU/DU/DU Detail) must keep using __setSlicerSelection per page.
+    //
+    // IMPORTANT: takes an ARRAY of {target, values} specs and applies them all
+    // in ONE setFilters() call — not one call per field. setFilters() REPLACES
+    // the entire filter set every time it's called (confirmed from the SDK
+    // doc comments and from testing), so calling it once per field in a loop
+    // would silently wipe out every field applied before the last one. Always
+    // batch everything for one scope into a single call.
+    window.__setGlobalFilters = async function(specs) {
+      var filters = specs.map(function(spec) {
+        return {
+          $schema:  'http://powerbi.com/product/schema#basic',
+          target:   spec.target,
+          operator: 'In',
+          values:   spec.values,
+          filterType: 1 // models.FilterType.Basic
+        };
+      });
+      try {
+        await window.__report.setFilters(filters);
+      } catch (e) {
+        var raw = '';
+        try { raw = JSON.stringify(e); } catch (_e2) { raw = String(e); }
+        var msg = (e && e.message) ? e.message : '(no message)';
+        throw new Error('report.setFilters failed (' + filters.length + ' field(s)): ' + msg + ' | raw=' + raw);
+      }
+      return { count: filters.length };
+    };
+
+    // Clears ALL report-level filters (only ones we set — this report has none
+    // by default in normal use, so a full reset is safe between scenarios).
+    window.__clearGlobalFilters = async function() {
+      await window.__report.setFilters([]);
+      return { cleared: true };
+    };
+
+    // Reads whatever report-level filters ALREADY exist on this report (the
+    // "Filters on all pages" section of the native Filters pane). This is the
+    // fast global-check step — one call, no page navigation, works regardless
+    // of page count. Returns [] for reports that don't use this pattern (e.g.
+    // Cygnus, which repeats the same field as an independent slicer per page
+    // instead — that pattern isn't detectable this way, only by reading pages).
+    window.__getGlobalFilters = async function() {
+      var filters = await window.__report.getFilters();
+      return (filters || []).map(function(f) {
+        return {
+          target: f.target,
+          values: f.values || null,        // Basic filters
+          hierarchyData: f.hierarchyData || null, // Hierarchy filters (rare at report level, but be safe)
+          filterType: f.filterType,
+        };
+      });
+    };
+
+    // Applies Basic filters to ONE page via page.setFilters() — no slicer
+    // visual required at all, just each field's table/column. Operates on the
+    // currently ACTIVE page (the caller navigates there first via __setPage,
+    // same pattern as every other per-page function in this harness), rather
+    // than assuming a not-yet-verified "set on an inactive page" shortcut.
+    // Flat fields only — Hierarchy filters are rejected here the same way
+    // they're rejected by report.setFilters() (confirmed from SDK source).
+    //
+    // Takes an ARRAY of {target, values} specs for the same reason as
+    // __setGlobalFilters above: page.setFilters() also REPLACES rather than
+    // adds, so multiple field-based filters on the same page must be applied
+    // together in one call, never in a per-field loop.
+    window.__setPageFieldFilters = async function(specs) {
+      var pages  = await window.__report.getPages();
+      var active = pages.find(function(p) { return p.isActive; }) || pages[0];
+
+      var filters = specs.map(function(spec) {
+        return {
+          $schema:  'http://powerbi.com/product/schema#basic',
+          target:   spec.target,
+          operator: 'In',
+          values:   spec.values,
+          filterType: 1 // models.FilterType.Basic
+        };
+      });
+
+      try {
+        await active.setFilters(filters);
+      } catch (e) {
+        var raw = '';
+        try { raw = JSON.stringify(e); } catch (_e2) { raw = String(e); }
+        var msg = (e && e.message) ? e.message : '(no message)';
+        throw new Error('page.setFilters failed for "' + active.displayName + '" (' + filters.length + ' field(s)): ' + msg + ' | raw=' + raw);
+      }
+      return { page: active.displayName, count: filters.length };
+    };
+
+    // Export a single visual's data by name (used to read a slicer's full
+    // available option list during discovery). Same export path as the bulk
+    // exporter, scoped to one visual.
+    window.__exportSingleVisual = async function(visualName) {
+      var pages   = await window.__report.getPages();
+      var active  = pages.find(function(p) { return p.isActive; }) || pages[0];
+      var visuals = await active.getVisuals();
+      var visual  = visuals.find(function(v) { return v.name === visualName; });
+      if (!visual) {
+        return { name: visualName, csvData: null, errorMessage: 'visual not found' };
+      }
+      try {
+        var exported = await visual.exportData(EXPORT_TYPE_SUMMARIZED);
+        return { name: visualName, csvData: exported.data, errorMessage: null };
+      } catch (e) {
+        return {
+          name: visualName,
+          csvData: null,
+          errorMessage: (e && e.message) ? e.message : JSON.stringify(e)
+        };
+      }
+    };
+
     // ── Export all visuals on the current active page ────────────────────────
+    // Types that never carry exportable tabular data — calling exportData() on
+    // these always fails (slicers/advancedSlicers especially: confirmed in
+    // practice on dense pages with 15+ slicers, each a wasted round-trip).
+    // Skipping them here avoids that round-trip entirely instead of paying for
+    // it and discarding the result later in report-export.helpers.ts's
+    // SKIP_TYPES filter — keep this list in sync with that one.
+    var SKIP_EXPORT_TYPES = { slicer: true, advancedSlicer: true, image: true, shape: true, textbox: true, actionButton: true };
+
     window.__exportPageVisuals = async function() {
       var pages   = await window.__report.getPages();
       var active  = pages.find(function(p) { return p.isActive; }) || pages[0];
@@ -132,6 +445,12 @@
           csvData:      null,
           errorMessage: null
         };
+
+        if (SKIP_EXPORT_TYPES[visual.type]) {
+          entry.errorMessage = 'skipped (visual type does not export tabular data)';
+          results.push(entry);
+          continue;
+        }
 
         try {
           var exported = await visual.exportData(EXPORT_TYPE_SUMMARIZED);

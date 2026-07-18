@@ -32,6 +32,31 @@ import type { WorkbookDiffSummary, VisualBlockDiff } from './excel-compare.helpe
 const SKIP_TYPES = new Set(['image', 'shape', 'textbox', 'actionButton']);
 const EXCEL_MAX_SHEET_NAME = 31;
 
+// One retry, after a short pause, for the same class of transient hiccup
+// readSlicerOptions() in harness.helpers.ts already retries around (observed
+// in practice on busy pages) — cheap insurance against a single page silently
+// looking like a genuine data difference between source and target.
+const NAV_RETRY_WAIT_MS    = 1500;
+const EXPORT_RETRY_WAIT_MS = 1500;
+
+/**
+ * Errors that cross the page.evaluate() boundary aren't always proper Error
+ * instances with a usable .message — some Power BI SDK rejections are plain
+ * objects that stringify down to "[object Object]" or just "Object" if you
+ * assume .message exists. This pulls out whatever is actually readable.
+ */
+function describeError(e: unknown): string {
+  if (e instanceof Error && e.message) return e.message;
+  if (typeof e === 'string') return e;
+  try {
+    const s = JSON.stringify(e);
+    if (s && s !== '{}') return s;
+  } catch {
+    // fall through
+  }
+  return String(e);
+}
+
 // ── Sheet-name helpers (Excel forbids : \ / ? * [ ] and 31-char names) ────────
 function toExcelSafeSheetBase(name: string): string {
   const cleaned = name.replace(/[:\\/?*[\]]/g, ' ').trim();
@@ -79,6 +104,25 @@ export interface ExportOptions {
   sheetNameFor?: (pageDisplayName: string) => string;
   /** Label for console logging, e.g. "source (Import mode)". */
   label?: string;
+  /**
+   * Optional hook called ONCE, before any page is visited — for filters that
+   * apply at the report level (affecting every page in one call), as opposed
+   * to applySlicersForPage which runs once per page. If it throws, export
+   * continues (a warning is logged) — the per-page hook is the safety net for
+   * anything the global hook didn't (or couldn't) cover.
+   */
+  beforeExport?: (page: Page) => Promise<void>;
+  /**
+   * Optional hook called AFTER navigating to each page but BEFORE exporting its
+   * visuals. Use it to apply slicer selections (filters) for that page. Receives
+   * the Playwright page and the page's display name; should apply and settle any
+   * filters, then resolve. If it throws, the page is still exported (unfiltered)
+   * and a warning is logged, so one bad slicer can't abort the whole run.
+   *
+   * Kept as a generic callback so this module has no dependency on the slicer
+   * scenario config — the spec wires the two together.
+   */
+  applySlicersForPage?: (page: Page, pageDisplayName: string) => Promise<void>;
 }
 
 // ── Styling (light — values are what matter, but readable output helps) ───────
@@ -145,19 +189,71 @@ export async function exportReportToWorkbook(
   const usedSheetNames = new Set<string>();
   const exported: PageExportResult[] = [];
 
+  if (options.beforeExport) {
+    try {
+      await options.beforeExport(page);
+    } catch (e) {
+      console.warn(`[export:${label}]   beforeExport hook failed — continuing without it: ${describeError(e)}`);
+    }
+  }
+
   for (const rp of selected) {
     console.log(`[export:${label}]   → page "${rp.displayName}"`);
+
+    let navigated = true;
     try {
       await setReportPage(page, rp.name);
     } catch (e) {
-      console.warn(`[export:${label}]     could not navigate to page "${rp.displayName}": ${(e as Error).message}`);
+      console.warn(`[export:${label}]     could not navigate to page "${rp.displayName}" — retrying once: ${describeError(e)}`);
+      await page.waitForTimeout(NAV_RETRY_WAIT_MS);
+      try {
+        await setReportPage(page, rp.name);
+      } catch (e2) {
+        navigated = false;
+        console.warn(`[export:${label}]     navigation to "${rp.displayName}" failed again — skipping this page (exporting it now would have captured the WRONG page's data): ${describeError(e2)}`);
+      }
+    }
+
+    if (!navigated) {
+      // Skip slicer application + export entirely — the report is still on
+      // whatever page it was on before. Write an explicit marker sheet rather
+      // than omitting it, so this reads as "we couldn't read this page" in the
+      // comparison output instead of an ambiguous "page missing" diff.
+      const desiredSheetName = sheetNameFor(rp.displayName);
+      const wsName = toUniqueSheetName(desiredSheetName, usedSheetNames);
+      const ws = wb.addWorksheet(wsName);
+      const row = ws.addRow([`[PAGE NAVIGATION FAILED — could not reach "${rp.displayName}"; page skipped]`]);
+      row.commit();
+      ws.commit();
+      exported.push({
+        sheetName: wsName, pageDisplayName: rp.displayName, pageInternalName: rp.name,
+        visualsWithData: 0, totalRows: 0,
+      });
+      continue;
+    }
+
+    // Apply slicer selections for this page (if a hook was provided), after
+    // navigation and before export. Isolated so a slicer failure downgrades to
+    // an unfiltered export of this page rather than failing the whole run.
+    if (options.applySlicersForPage) {
+      try {
+        await options.applySlicersForPage(page, rp.displayName);
+      } catch (e) {
+        console.warn(`[export:${label}]     slicer application failed on "${rp.displayName}" — exporting UNFILTERED: ${describeError(e)}`);
+      }
     }
 
     let visuals: VisualExport[] = [];
     try {
       visuals = await exportCurrentPageVisuals(page);
     } catch (e) {
-      console.warn(`[export:${label}]     export failed on "${rp.displayName}": ${(e as Error).message}`);
+      console.warn(`[export:${label}]     export failed on "${rp.displayName}" — retrying once: ${describeError(e)}`);
+      await page.waitForTimeout(EXPORT_RETRY_WAIT_MS);
+      try {
+        visuals = await exportCurrentPageVisuals(page);
+      } catch (e2) {
+        console.warn(`[export:${label}]     export failed again on "${rp.displayName}" — page will be written with no data: ${describeError(e2)}`);
+      }
     }
 
     const desiredSheetName = sheetNameFor(rp.displayName);

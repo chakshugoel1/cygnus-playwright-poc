@@ -18,7 +18,7 @@
 			"args": [
 				"-NoProfile",
 				"-Command",
-				"$p = Join-Path $env:USERPROFILE '.askme-poc-secrets\\pbi-service-principal.json'; if (-not (Test-Path $p)) { Write-Output 'exists=false'; exit 0 }; Write-Output 'exists=true'; try { $j = Get-Content $p -Raw | ConvertFrom-Json; Write-Output 'jsonValid=true'; Write-Output ('tenantIdPresent=' + [bool]($j.tenantId)); Write-Output ('clientIdPresent=' + [bool]($j.clientId)); Write-Output ('clientSecretPresent=' + [bool]($j.clientSecret)); } catch { Write-Output 'jsonValid=false'; }"
+				"$p = Join-Path $env:USERPROFILE 'Power_BI_report_validation_credentials\\pbi-service-principal.json'; if (-not (Test-Path $p)) { Write-Output 'exists=false'; exit 0 }; Write-Output 'exists=true'; try { $j = Get-Content $p -Raw | ConvertFrom-Json; Write-Output 'jsonValid=true'; Write-Output ('tenantIdPresent=' + [bool]($j.tenantId)); Write-Output ('clientIdPresent=' + [bool]($j.clientId)); Write-Output ('clientSecretPresent=' + [bool]($j.clientSecret)); } catch { Write-Output 'jsonValid=false'; }"
 			],
 			"isBackground": false
 		},
@@ -138,7 +138,7 @@
 			"command": "C:\\Progra~1\\nodejs\\node.exe",
 			"args": [
 				"-e",
-				"const fs=require('fs'); const p=process.env.USERPROFILE+'\\\\.askme-poc-secrets\\\\pbi-service-principal.json'; if(!fs.existsSync(p)){console.log('exists=false'); process.exit(0);} console.log('exists=true'); try{const j=JSON.parse(fs.readFileSync(p,'utf8')); console.log('jsonValid=true'); console.log('tenantIdPresent='+Boolean(j.tenantId)); console.log('clientIdPresent='+Boolean(j.clientId)); console.log('clientSecretPresent='+Boolean(j.clientSecret));}catch{console.log('jsonValid=false');}"
+				"const fs=require('fs'); const p=process.env.USERPROFILE+'\\\\Power_BI_report_validation_credentials\\\\pbi-service-principal.json'; if(!fs.existsSync(p)){console.log('exists=false'); process.exit(0);} console.log('exists=true'); try{const j=JSON.parse(fs.readFileSync(p,'utf8')); console.log('jsonValid=true'); console.log('tenantIdPresent='+Boolean(j.tenantId)); console.log('clientIdPresent='+Boolean(j.clientId)); console.log('clientSecretPresent='+Boolean(j.clientSecret));}catch{console.log('jsonValid=false');}"
 			],
 			"isBackground": false
 		},
@@ -168,7 +168,7 @@
 			"command": "cmd",
 			"args": [
 				"/c",
-				"powershell -NoProfile -Command \"$p=Join-Path $env:USERPROFILE '.askme-poc-secrets\\pbi-service-principal.json'; if(!(Test-Path $p)){ 'exists=false'; exit 0 }; 'exists=true'; try{$j=Get-Content $p -Raw | ConvertFrom-Json; 'jsonValid=true'; 'tenantIdPresent=' + [bool]$j.tenantId; 'clientIdPresent=' + [bool]$j.clientId; 'clientSecretPresent=' + [bool]$j.clientSecret } catch { 'jsonValid=false' }\""
+				"powershell -NoProfile -Command \"$p=Join-Path $env:USERPROFILE 'Power_BI_report_validation_credentials\\pbi-service-principal.json'; if(!(Test-Path $p)){ 'exists=false'; exit 0 }; 'exists=true'; try{$j=Get-Content $p -Raw | ConvertFrom-Json; 'jsonValid=true'; 'tenantIdPresent=' + [bool]$j.tenantId; 'clientIdPresent=' + [bool]$j.clientId; 'clientSecretPresent=' + [bool]$j.clientSecret } catch { 'jsonValid=false' }\""
 			],
 			"isBackground": false
 		},
@@ -178,7 +178,7 @@
 			"command": "cmd",
 			"args": [
 				"/c",
-				"C:\\Progra~1\\nodejs\\node.exe -e \"const fs=require(\\\"fs\\\");const p=process.env.USERPROFILE+\\\"\\\\\\\\.askme-poc-secrets\\\\\\\\pbi-service-principal.json\\\";if(!fs.existsSync(p)){console.log(\\\"exists=false\\\");process.exit(0);}console.log(\\\"exists=true\\\");try{const j=JSON.parse(fs.readFileSync(p,\\\"utf8\\\"));console.log(\\\"jsonValid=true\\\");console.log(\\\"tenantIdPresent=\\\"+Boolean(j.tenantId));console.log(\\\"clientIdPresent=\\\"+Boolean(j.clientId));console.log(\\\"clientSecretPresent=\\\"+Boolean(j.clientSecret));}catch(e){console.log(\\\"jsonValid=false\\\");}\""
+				"C:\\Progra~1\\nodejs\\node.exe -e \"const fs=require(\\\"fs\\\");const p=process.env.USERPROFILE+\\\"\\\\\\\\Power_BI_report_validation_credentials\\\\\\\\pbi-service-principal.json\\\";if(!fs.existsSync(p)){console.log(\\\"exists=false\\\");process.exit(0);}console.log(\\\"exists=true\\\");try{const j=JSON.parse(fs.readFileSync(p,\\\"utf8\\\"));console.log(\\\"jsonValid=true\\\");console.log(\\\"tenantIdPresent=\\\"+Boolean(j.tenantId));console.log(\\\"clientIdPresent=\\\"+Boolean(j.clientId));console.log(\\\"clientSecretPresent=\\\"+Boolean(j.clientSecret));}catch(e){console.log(\\\"jsonValid=false\\\");}\""
 			],
 			"isBackground": false
 		},
@@ -208,7 +208,7 @@
 			"command": "cmd",
 			"args": [
 				"/c",
-				"powershell -NoProfile -Command \"(Get-Content $env:USERPROFILE\\.askme-poc-secrets\\.auth\\cygnus.user.json | Measure-Object -Line).Lines\""
+				"powershell -NoProfile -Command \"(Get-Content $env:USERPROFILE\\Power_BI_report_validation_credentials\\.auth\\cygnus.user.json | Measure-Object -Line).Lines\""
 			],
 			"isBackground": false
 		},
