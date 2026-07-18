@@ -15,7 +15,7 @@
 import * as fs   from 'fs';
 import * as path from 'path';
 import type { Page } from '@playwright/test';
-import { getReportMetadata, generateEmbedToken, generateEmbedTokenWithSP, getClusterDetails, proxyHttpsRequest, extractEmailFromToken, extractUserTokenFromBrowser, getPbiAccessToken, type EmbedTokenResult } from './pbi-api.helpers';
+import { getReportMetadata, generateEmbedTokenWithSP, getClusterDetails, extractEmailFromToken, extractUserTokenFromBrowser, getPbiAccessToken } from './pbi-api.helpers';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -332,18 +332,6 @@ export async function getReportPages(page: Page): Promise<ReportPage[]> {
 }
 
 /**
- * Filters out hidden pages (visibility === 1) — tooltip pages and
- * drillthrough targets that exist in every report but were never meant to be
- * navigated to directly. Power BI's exportData()/setPage() calls can behave
- * unpredictably on these (e.g. a tooltip page expecting a drillthrough
- * context it never received), so flows that walk "every page" should use
- * this rather than the raw list unless there's a specific reason not to.
- */
-export function visiblePages(pages: ReportPage[]): ReportPage[] {
-  return pages.filter(p => p.visibility !== 1);
-}
-
-/**
  * Navigates the embedded report to the specified page by internal name.
  * Get page names from getReportPages() first.
  * Waits 4 seconds after navigation for the page to settle.
@@ -382,39 +370,6 @@ export async function exportCurrentPageVisuals(page: Page): Promise<VisualExport
       errorMessage: raw.errorMessage,
     };
   });
-}
-
-/**
- * Convenience wrapper: navigate to a page by displayName and export all visuals.
- * Finds the page whose displayName matches (case-insensitive partial match).
- *
- * @param page         Playwright page with harness loaded
- * @param displayName  Report page display name (e.g. "Manager", "Employee")
- */
-export async function exportVisualsForTab(
-  page: Page,
-  displayName: string,
-): Promise<{ page: ReportPage | null; visuals: VisualExport[] }> {
-  const pages = await getReportPages(page);
-
-  // Try exact match first, then case-insensitive partial
-  const target =
-    pages.find(p => p.displayName === displayName) ??
-    pages.find(p => p.displayName.toLowerCase().includes(displayName.toLowerCase()));
-
-  if (!target) {
-    console.warn(`[harness] Page "${displayName}" not found. Available: ${pages.map(p => p.displayName).join(', ')}`);
-    return { page: null, visuals: [] };
-  }
-
-  console.log(`[harness] Navigating to page "${target.displayName}" (${target.name})`);
-  await setReportPage(page, target.name);
-
-  const visuals = await exportCurrentPageVisuals(page);
-  const dataCount = visuals.filter(v => v.rowCount > 0).length;
-  console.log(`[harness] Exported ${visuals.length} visuals — ${dataCount} with data`);
-
-  return { page: target, visuals };
 }
 
 // ── Slicer helpers ──────────────────────────────────────────────────────────
@@ -502,20 +457,13 @@ export async function setSlicerSelection(
   await page.waitForTimeout(SLICER_SETTLE_MS);
 }
 
-/** Clears a slicer back to "all values", then waits for the page to redraw. */
-export async function clearSlicerSelection(page: Page, visualName: string): Promise<void> {
-  await page.evaluate((name: string) => {
-    return (window as any).__clearSlicerSelection(name);
-  }, visualName);
-  await page.waitForTimeout(SLICER_SETTLE_MS);
-}
-
 /**
  * Full discovery for the active page: lists every slicer and, for each flat
  * slicer, reads its available options. Tree/hierarchy slicers are reported
  * with isHierarchy=true and an empty options list (the UI shows them as a
- * drill-in picker rather than a flat dropdown, and their options are read
- * step-by-step as parents are chosen — see discoverDependentOptions).
+ * drill-in picker rather than a flat dropdown; deeper levels are read
+ * step-by-step as parent levels are chosen, by calling setSlicerSelection on
+ * the parent then readSlicerOptions on the child).
  *
  * IMPORTANT ordering note: this reads options in the slicer order returned by
  * Power BI. If a page has cascading slicers and you want a dependent slicer's
@@ -573,26 +521,6 @@ export async function discoverPageSlicers(page: Page): Promise<DiscoveredSlicer[
     });
   }
   return out;
-}
-
-/**
- * Reads a dependent (child) slicer's options AFTER one or more parent
- * selections have been applied — this is how cascading is handled generically.
- * Applies each parent selection in order (waiting for redraw between each),
- * then reads the child's now-narrowed options.
- *
- * @param parents  ordered list of {visualName, values} to apply first
- * @param childVisualName  the slicer whose narrowed options you want
- */
-export async function discoverDependentOptions(
-  page: Page,
-  parents: Array<{ visualName: string; values: string[] }>,
-  childVisualName: string,
-): Promise<string[]> {
-  for (const p of parents) {
-    await setSlicerSelection(page, p.visualName, p.values);
-  }
-  return readSlicerOptions(page, childVisualName);
 }
 
 // ── Report-level (global) filtering ─────────────────────────────────────────
