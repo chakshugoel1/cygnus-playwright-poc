@@ -145,6 +145,7 @@ const MISSING_VISUAL_SAMPLE_CAP = 20;
 // integers risks corrupting IDs like "007" that must keep their exact text.
 const PLAIN_DECIMAL_RE = /^-?\d+\.\d+$/;
 const NUMERIC_ROUND_DECIMALS = 4;
+const LENIENT_TEXT_COMPARE = (process.env['CYGNUS_COMPARE_TEXT_LENIENT'] ?? '').trim() === '1';
 
 /**
  * Collapses floating-point noise in decimal-looking text (e.g. a DAX SUM that
@@ -158,6 +159,19 @@ function normalizeNumericDrift(text: string): string {
   if (!Number.isFinite(n)) return text;
   const rounded = n.toFixed(NUMERIC_ROUND_DECIMALS).replace(/0+$/, '').replace(/\.$/, '');
   return rounded;
+}
+
+/**
+ * Canonical form used for equality/hash checks only.
+ * When lenient mode is on, case and common separator differences are ignored.
+ */
+function canonicalizeForCompare(text: string): string {
+  if (!LENIENT_TEXT_COMPARE) return text;
+  return text
+    .toLocaleLowerCase()
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 /**
@@ -196,7 +210,7 @@ function normalizeRow(row: ExcelJS.Row): string[] {
 // ── Hashing ───────────────────────────────────────────────────────────────────
 
 function hashRow(cells: string[]): string {
-  return crypto.createHash('sha1').update(JSON.stringify(cells)).digest('hex');
+  return crypto.createHash('sha1').update(JSON.stringify(cells.map(canonicalizeForCompare))).digest('hex');
 }
 
 function hashRunning(existing: string, rowHash: string): string {
@@ -320,7 +334,7 @@ async function streamSheetBlocks(filePath: string, sheetName: string): Promise<V
 // ── Tier 2: block matching + comparison ───────────────────────────────────────
 
 function headerKey(headers: string[]): string {
-  return headers.join('\u0001');
+  return headers.map(canonicalizeForCompare).join('\u0001');
 }
 
 /** Order-independent content signature for a block's data rows. */
@@ -356,13 +370,20 @@ function dedupeBlocks(blocks: VisualBlockRaw[]): { representative: VisualBlockRa
  */
 function realignByHeader(headers: string[], rows: string[][], targetOrder: string[]): string[][] | null {
   if (headers.length !== targetOrder.length) return null;
-  const sortedA = [...headers].sort().join('\u0001');
-  const sortedB = [...targetOrder].sort().join('\u0001');
+  const sortedA = headers.map(canonicalizeForCompare).sort().join('\u0001');
+  const sortedB = targetOrder.map(canonicalizeForCompare).sort().join('\u0001');
   if (sortedA !== sortedB) return null;
 
   const indexOf = new Map<string, number>();
-  headers.forEach((h, i) => indexOf.set(h, i));
-  return rows.map(r => targetOrder.map(h => r[indexOf.get(h)!] ?? ''));
+  for (let i = 0; i < headers.length; i++) {
+    const key = canonicalizeForCompare(headers[i]);
+    if (indexOf.has(key)) {
+      // Ambiguous (two headers collapse to same canonical key); keep positional compare.
+      return null;
+    }
+    indexOf.set(key, i);
+  }
+  return rows.map(r => targetOrder.map(h => r[indexOf.get(canonicalizeForCompare(h))!] ?? ''));
 }
 
 /** Order-independent row diff between two row sets, with true counts + capped samples. */
@@ -469,16 +490,32 @@ function compareBlockPair(
  */
 function matchVisualBlocks(expectedBlocks: VisualBlockRaw[], actualBlocks: VisualBlockRaw[]): VisualBlockDiff[] {
   const results: VisualBlockDiff[] = [];
-  const titles = new Set([...expectedBlocks.map(b => b.title), ...actualBlocks.map(b => b.title)]);
+  const titleKeyToDisplay = new Map<string, string>();
+  const addTitle = (t: string) => {
+    const key = canonicalizeForCompare(t);
+    if (!titleKeyToDisplay.has(key)) titleKeyToDisplay.set(key, t);
+  };
+  expectedBlocks.forEach(b => addTitle(b.title));
+  actualBlocks.forEach(b => addTitle(b.title));
+  const titleKeys = [...titleKeyToDisplay.keys()];
 
-  for (const title of titles) {
-    const expForTitle = expectedBlocks.filter(b => b.title === title);
-    const actForTitle = actualBlocks.filter(b => b.title === title);
-    const types = new Set([...expForTitle.map(b => b.type), ...actForTitle.map(b => b.type)]);
+  for (const titleKey of titleKeys) {
+    const title = titleKeyToDisplay.get(titleKey)!;
+    const expForTitle = expectedBlocks.filter(b => canonicalizeForCompare(b.title) === titleKey);
+    const actForTitle = actualBlocks.filter(b => canonicalizeForCompare(b.title) === titleKey);
+    const typeKeyToDisplay = new Map<string, string>();
+    const addType = (t: string) => {
+      const key = canonicalizeForCompare(t);
+      if (!typeKeyToDisplay.has(key)) typeKeyToDisplay.set(key, t);
+    };
+    expForTitle.forEach(b => addType(b.type));
+    actForTitle.forEach(b => addType(b.type));
+    const typeKeys = [...typeKeyToDisplay.keys()];
 
-    for (const type of types) {
-      const expList = expForTitle.filter(b => b.type === type);
-      const actList = actForTitle.filter(b => b.type === type);
+    for (const typeKey of typeKeys) {
+      const type = typeKeyToDisplay.get(typeKey)!;
+      const expList = expForTitle.filter(b => canonicalizeForCompare(b.type) === typeKey);
+      const actList = actForTitle.filter(b => canonicalizeForCompare(b.type) === typeKey);
 
       if (expList.length === 0) {
         for (const { representative, count } of dedupeBlocks(actList)) {
@@ -547,6 +584,71 @@ function matchVisualBlocks(expectedBlocks: VisualBlockRaw[], actualBlocks: Visua
   return results;
 }
 
+// ── Fallback for sheets with no [VISUAL] markers at all ──────────────────────
+//
+// Used only when neither side's sheet parsed into any visual blocks — most
+// often an arbitrary xlsx passed to the standalone compare:excel tool, not a
+// Cygnus report-export.helpers.ts output. Reads every row directly (same
+// blank-row skipping as Tier 1) and diffs them as one plain block, so a
+// non-Cygnus-format sheet still gets a real comparison instead of a vacuous
+// "nothing parsed, so call it identical".
+
+async function streamPlainRows(filePath: string, sheetName: string): Promise<string[][]> {
+  const rows: string[][] = [];
+  const reader = new (ExcelJS as any).stream.xlsx.WorkbookReader(filePath, {
+    sharedStrings: 'cache',
+    hyperlinks:    'ignore',
+    styles:        'ignore',
+    entries:       'emit',
+  });
+  for await (const ws of reader) {
+    if (ws.name !== sheetName) {
+      for await (const _ of ws) { /* drain */ }
+      continue;
+    }
+    for await (const row of ws) {
+      const cells = normalizeRow(row as ExcelJS.Row);
+      if (cells.every(c => c === '')) continue;
+      rows.push(cells);
+    }
+  }
+  return rows;
+}
+
+async function comparePlainSheet(
+  fileExpected: string, fileActual: string, sheetName: string,
+): Promise<VisualBlockDiff[]> {
+  const [rowsExp, rowsAct] = await Promise.all([
+    streamPlainRows(fileExpected, sheetName),
+    streamPlainRows(fileActual,   sheetName),
+  ]);
+
+  const expSig = blockDataSignature(rowsExp);
+  const actSig = blockDataSignature(rowsAct);
+  const base = {
+    title: '(whole sheet)', type: 'sheet',
+    countExpected: 1, countActual: 1,
+    rowsExpected: rowsExp.length, rowsActual: rowsAct.length,
+    headerExpected: [], headerActual: [],
+  };
+
+  if (expSig === actSig) {
+    return [{
+      ...base, status: 'identical',
+      sampleOnlyInExpected: [], sampleOnlyInActual: [],
+      onlyInExpectedCount: 0, onlyInActualCount: 0,
+    }];
+  }
+
+  const d = diffRows(rowsExp, rowsAct);
+  return [{
+    ...base, status: 'data-diff',
+    sampleOnlyInExpected: d.sampleOnlyInExpected, sampleOnlyInActual: d.sampleOnlyInActual,
+    onlyInExpectedCount: d.onlyInExpectedCount, onlyInActualCount: d.onlyInActualCount,
+    note: 'This sheet has no [VISUAL] marker rows — compared as one plain block instead of per-visual.',
+  }];
+}
+
 // ── Main public function ──────────────────────────────────────────────────────
 
 /**
@@ -610,7 +712,20 @@ export async function compareWorkbooks(
       streamSheetBlocks(fileExpected, sheetName),
       streamSheetBlocks(fileActual,   sheetName),
     ]);
-    const visuals = matchVisualBlocks(expBlocks, actBlocks);
+
+    let visuals: VisualBlockDiff[];
+    if (expBlocks.length === 0 && actBlocks.length === 0) {
+      // Neither side has any [VISUAL]-marker rows — this sheet isn't in the
+      // report-export.helpers.ts format (e.g. an arbitrary xlsx passed to the
+      // standalone `compare:excel` tool, not a Cygnus visual export). Tier 1
+      // already proved these sheets are NOT byte-identical (that's the only
+      // way execution reaches here), so falling through to an empty visuals
+      // list would be a vacuous truth — "nothing to compare" is not the same
+      // as "everything matches". Compare the raw rows directly instead.
+      visuals = await comparePlainSheet(fileExpected, fileActual, sheetName);
+    } else {
+      visuals = matchVisualBlocks(expBlocks, actBlocks);
+    }
 
     const identical      = visuals.length > 0 ? visuals.every(v => v.status === 'identical') : true;
     const dataIdentical   = visuals.every(v =>

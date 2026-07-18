@@ -1,8 +1,8 @@
 /**
- * Power BI REST API helpers — token acquisition and DAX query execution.
+ * Power BI REST API helpers — token acquisition and embed-token generation.
  *
  * Prerequisites (plug-in when IT provides service principal):
- *   ~/.askme-poc-secrets/pbi-service-principal.json
+ *   ~/Power_BI_report_validation_credentials/pbi-service-principal.json
  *   {
  *     "tenantId": "8b87af7d-8647-4dc7-8df4-5f69a2011bb5",
  *     "clientId":  "<from IT>",
@@ -10,10 +10,7 @@
  *   }
  *
  * Usage:
- *   import { runDaxQuery, getPbiAccessToken } from './pbi-api.helpers';
- *
- *   const rows = await runDaxQuery('EVALUATE TOPN(10, DIM_EMP)');
- *   // rows = [{ '[DIM_EMP].[EMP_SK]': 1, '[DIM_EMP].[FULL_NAME]': 'Alice' }, ...]
+ *   import { getPbiAccessToken, generateEmbedTokenWithSP } from './pbi-api.helpers';
  */
 
 import * as https from 'https';
@@ -25,7 +22,6 @@ import { getPocConfig } from './poc-config.helpers';
 // ── Constants ────────────────────────────────────────────────────────────────
 
 const POC = getPocConfig();
-const TENANT_ID  = POC.tenantId;
 // wks_cygnus_dev dataset (matches GROUP_ID/REPORT_ID above)
 const DATASET_ID = POC.datasetId;
 
@@ -34,13 +30,9 @@ const RLS_ROLE   = POC.rlsRole;
 
 const SECRETS_DIR = path.join(
   process.env['USERPROFILE'] ?? process.env['HOME'] ?? '',
-  '.askme-poc-secrets',
+  'Power_BI_report_validation_credentials',
 );
 const SP_FILE = path.join(SECRETS_DIR, 'pbi-service-principal.json');
-
-const TOKEN_ENDPOINT = `https://login.microsoftonline.com/${TENANT_ID}/oauth2/v2.0/token`;
-const EXECUTE_QUERIES_ENDPOINT =
-  `https://api.powerbi.com/v1.0/myorg/datasets/${DATASET_ID}/executeQueries`;
 
 // ── In-memory token cache ─────────────────────────────────────────────────────
 
@@ -175,115 +167,6 @@ export async function getPbiAccessToken(): Promise<string> {
   return _cache.token;
 }
 
-// ── Public types ──────────────────────────────────────────────────────────────
-
-export interface DaxRow {
-  [columnName: string]: string | number | boolean | null;
-}
-
-export interface DaxQueryResult {
-  tableName: string;
-  daxExpression: string;
-  rowCount: number;
-  rows: DaxRow[];
-  columnNames: string[];
-  errorMessage: string | null;
-}
-
-// ── Public: run a DAX query against the dataset ───────────────────────────────
-
-/**
- * Executes a DAX expression against the Cygnus dataset and returns rows.
- *
- * @param daxExpression - e.g. `EVALUATE TOPN(10, DIM_EMP, [EMP_SK], 1)`
- * @param label         - optional label for logging/reporting
- *
- * @example
- *   const result = await runDaxQuery('EVALUATE TOPN(5, DIM_EMP)', 'DIM_EMP');
- *   console.log(result.rows); // [{ '[DIM_EMP].[EMP_SK]': 1, ... }, ...]
- */
-export async function runDaxQuery(
-  daxExpression: string,
-  label = 'query',
-): Promise<DaxQueryResult> {
-  const result: DaxQueryResult = {
-    tableName:     label,
-    daxExpression,
-    rowCount:      0,
-    rows:          [],
-    columnNames:   [],
-    errorMessage:  null,
-  };
-
-  try {
-    const token = await getPbiAccessToken();
-
-    const requestBody = JSON.stringify({
-      queries: [{ query: daxExpression }],
-      serializerSettings: { includeNulls: true },
-    });
-
-    const res = await httpsPost(
-      EXECUTE_QUERIES_ENDPOINT,
-      requestBody,
-      {
-        'Content-Type':  'application/json',
-        'Authorization': `Bearer ${token}`,
-      },
-    );
-
-    if (res.status !== 200) {
-      result.errorMessage = `HTTP ${res.status}: ${res.body.slice(0, 300)}`;
-      return result;
-    }
-
-    const parsed = JSON.parse(res.body);
-    const table  = parsed?.results?.[0]?.tables?.[0];
-
-    if (!table) {
-      result.errorMessage = `Unexpected response structure: ${res.body.slice(0, 300)}`;
-      return result;
-    }
-
-    const rows: DaxRow[] = table.rows ?? [];
-    result.rows        = rows;
-    result.rowCount    = rows.length;
-    result.columnNames = rows.length > 0 ? Object.keys(rows[0]) : [];
-
-  } catch (e: any) {
-    result.errorMessage = String(e);
-  }
-
-  return result;
-}
-
-// ── Public: batch query multiple tables ───────────────────────────────────────
-
-/**
- * Queries multiple tables in sequence. Returns one DaxQueryResult per table.
- * Stops early if the first query fails with an auth error.
- *
- * @param queries - array of { dax, label } objects
- */
-export async function runBatchDaxQueries(
-  queries: Array<{ dax: string; label: string }>,
-): Promise<DaxQueryResult[]> {
-  const results: DaxQueryResult[] = [];
-
-  for (const q of queries) {
-    const r = await runDaxQuery(q.dax, q.label);
-    results.push(r);
-
-    // Stop early on auth failure — no point running more
-    if (r.errorMessage?.includes('401') || r.errorMessage?.includes('403')) {
-      console.warn(`[pbi-api] Auth failure on "${q.label}" — stopping batch`);
-      break;
-    }
-  }
-
-  return results;
-}
-
 // ── Public: get the API-correct embed URL for the report ─────────────────────
 // wks_cygnus_dev workspace — the user (chakshu.goel) is a Member here, so
 // TokenType.Aad embeds bypass RLS and see all data.
@@ -334,12 +217,6 @@ export async function getReportMetadata(userToken: string): Promise<ReportMetada
     datasetId: data.datasetId as string,
     name:      data.name      as string,
   };
-}
-
-/** @deprecated Use getReportMetadata which also returns the datasetId */
-export async function getReportEmbedUrl(userToken: string): Promise<string> {
-  const { embedUrl } = await getReportMetadata(userToken);
-  return embedUrl;
 }
 
 // ── Browser user-token extraction (works with Delegated permissions) ──────────
@@ -404,69 +281,31 @@ export async function extractUserTokenFromBrowser(page: Page): Promise<string | 
   });
 }
 
+const DEFAULT_TOKEN_POLL_TIMEOUT_MS = 30_000;
+const TOKEN_POLL_INTERVAL_MS        = 2_000;
+
 /**
- * Runs a DAX query using the signed-in user's token extracted from the browser.
- * Use this when Application permissions are unavailable (Delegated-only setup).
+ * Polls extractUserTokenFromBrowser() every TOKEN_POLL_INTERVAL_MS until a
+ * token is found or the timeout elapses. Shared by report-parity.spec.ts and
+ * discover-slicers.spec.ts, which both need this exact loop after navigating
+ * to app.powerbi.com and waiting for its authenticated calls to fire.
  *
- * @param page          - Playwright Page on app.powerbi.com
- * @param daxExpression - DAX query string
- * @param label         - label for reporting
+ * Timeout defaults to CYGNUS_TOKEN_TIMEOUT_MS (env) or 30s — configurable
+ * since a slow network/tenant can legitimately take longer than a fixed
+ * ceiling to fire MSAL's token acquisition.
  */
-export async function runDaxQueryWithUserToken(
-  page: Page,
-  daxExpression: string,
-  label = 'query',
-): Promise<DaxQueryResult> {
-  const result: DaxQueryResult = {
-    tableName:    label,
-    daxExpression,
-    rowCount:     0,
-    rows:         [],
-    columnNames:  [],
-    errorMessage: null,
-  };
-
-  const token = await extractUserTokenFromBrowser(page);
-  if (!token) {
-    result.errorMessage = 'Could not extract user token from browser MSAL cache. ' +
-      'Ensure the page is on app.powerbi.com and the user is logged in.';
-    return result;
-  }
-
-  const requestBody = JSON.stringify({
-    queries: [{ query: daxExpression }],
-    serializerSettings: { includeNulls: true },
-  });
-
-  const res = await httpsPost(
-    EXECUTE_QUERIES_ENDPOINT,
-    requestBody,
-    {
-      'Content-Type':  'application/json',
-      'Authorization': `Bearer ${token}`,
-    },
-  );
-
-  if (res.status !== 200) {
-    result.errorMessage = `HTTP ${res.status}: ${res.body.slice(0, 300)}`;
-    return result;
-  }
-
-  try {
-    const parsed = JSON.parse(res.body);
-    const table  = parsed?.results?.[0]?.tables?.[0];
-    if (table) {
-      result.rows        = table.rows ?? [];
-      result.rowCount    = result.rows.length;
-      result.columnNames = result.rows.length > 0 ? Object.keys(result.rows[0]) : [];
-    } else {
-      result.errorMessage = `Unexpected response structure: ${res.body.slice(0, 200)}`;
+export async function pollForUserToken(page: Page, timeoutMs?: number): Promise<string | null> {
+  const ceiling = timeoutMs ?? (Number(process.env['CYGNUS_TOKEN_TIMEOUT_MS']) || DEFAULT_TOKEN_POLL_TIMEOUT_MS);
+  let token: string | null = null;
+  const pollStart = Date.now();
+  while (!token && Date.now() - pollStart < ceiling) {
+    token = await extractUserTokenFromBrowser(page);
+    if (!token) {
+      console.log(`    ⏳ Token not yet captured — waiting ${TOKEN_POLL_INTERVAL_MS / 1000}s...`);
+      await page.waitForTimeout(TOKEN_POLL_INTERVAL_MS);
     }
-  } catch (e: any) {
-    result.errorMessage = `JSON parse error: ${e}`;
   }
-
-  return result;
+  return token;
 }
 
 // ── Public: decode user email from a JWT access token (Node.js, no verify) ─────
@@ -505,75 +344,6 @@ export interface EmbedTokenResult {
   expiration: string;
 }
 
-/**
- * Generates a Power BI embed token for the Cygnus report using the signed-in
- * user's browser token (user-owns-data embed scenario).
- *
- * Why this works when TokenType.Aad does not:
- *   - TokenType.Aad requires the AAD token to be issued for OUR registered app
- *     (appid = 5089a9ca). The browser token is issued for Microsoft's own PBI
- *     web app (appid = 871c010f), which the embed API rejects.
- *   - GenerateToken uses the user token to produce a Power BI-specific embed
- *     token that is not an AAD token. The returned token works with
- *     TokenType.Embed = 0, which has no appid restrictions.
- *
- * Prerequisites:
- *   - Delegated Report.Read.All permission (already granted & consented) ✅
- *   - The user must have a Pro or Premium Per User (PPU) licence, OR the
- *     workspace must be in a Premium/Fabric capacity.
- *   - The user must have at least Viewer access to the workspace.
- *
- * @param userToken - Bearer token from extractUserTokenFromBrowser()
- * @param userEmail - UPN from extractEmailFromToken(); when provided the RLS
- *                    identity is included so the Cygnus DynamicRoles filter works
- * @returns embed token, tokenId, and expiration timestamp
- */
-export async function generateEmbedToken(
-  userToken: string,
-  userEmail?: string | null,
-): Promise<EmbedTokenResult> {
-  const { groupId: GROUP_ID, reportId: REPORT_ID } = getPocConfig();
-  const url  = `https://api.powerbi.com/v1.0/myorg/groups/${GROUP_ID}/reports/${REPORT_ID}/GenerateToken`;
-
-  // Include the RLS identity if we know the user's email.
-  // The Cygnus dataset requires the DynamicRoles identity; without it the
-  // WABI cluster returns 403 when loading report data even though the token
-  // itself is generated successfully.
-  const bodyObj: Record<string, unknown> = { accessLevel: 'View' };
-  if (userEmail) {
-    bodyObj['identities'] = [
-      {
-        username: userEmail,
-        roles:    [RLS_ROLE],
-        datasets: [DATASET_ID],
-      },
-    ];
-  }
-  const body = JSON.stringify(bodyObj);
-
-  const res = await httpsPost(url, body, {
-    'Content-Type':  'application/json',
-    'Authorization': `Bearer ${userToken}`,
-  });
-
-  if (res.status !== 200) {
-    throw new Error(
-      `GenerateToken failed — HTTP ${res.status}: ${res.body.slice(0, 300)}`,
-    );
-  }
-
-  const data = JSON.parse(res.body);
-  if (!data.token) {
-    throw new Error(`GenerateToken response missing token field: ${res.body.slice(0, 200)}`);
-  }
-
-  return {
-    token:      data.token      as string,
-    tokenId:    data.tokenId    as string,
-    expiration: data.expiration as string,
-  };
-}
-
 // ── Public: generate an embed token using the Service Principal (App-Owns-Data) ─
 
 /**
@@ -588,7 +358,7 @@ export async function generateEmbedToken(
  *   access can always specify effective identities — this is the AskMe pattern.
  *
  * Prerequisites:
- *   - ~/.askme-poc-secrets/pbi-service-principal.json exists with credentials
+ *   - ~/Power_BI_report_validation_credentials/pbi-service-principal.json exists with credentials
  *   - The SP must be an Admin or Member of the Cygnus workspace
  *
  * @param userEmail - UPN of the signed-in user, used as the RLS effective identity
@@ -711,52 +481,5 @@ export async function getClusterDetails(embedToken: string, url: string): Promis
   return await httpsGet(url, {
     'Authorization': `Bearer ${embedToken}`,
     'Accept':        'application/json',
-  });
-}
-
-// ── Public: general-purpose HTTPS proxy (forwards any method from Node.js) ──────
-
-/**
- * Forwards an HTTP/S request from Node.js, bypassing all browser CORS and
- * mixed-content restrictions.  Used by harness.helpers to proxy WABI cluster
- * calls that the browser cannot make from http://localhost:3001.
- */
-export async function proxyHttpsRequest(
-  url: string,
-  method: string,
-  body: string,
-  headers: Record<string, string>,
-): Promise<{ status: number; body: string; responseHeaders: Record<string, string | string[]> }> {
-  return new Promise((resolve, reject) => {
-    const urlObj     = new URL(url);
-    const upperMethod = method.toUpperCase();
-    const hasBody    = (upperMethod === 'POST' || upperMethod === 'PUT' || upperMethod === 'PATCH') && body;
-    // Clone headers and strip hop-by-hop fields Node.js must not forward
-    const reqHeaders: Record<string, string | number> = { ...headers };
-    delete reqHeaders['host'];
-    delete reqHeaders['connection'];
-    delete reqHeaders['transfer-encoding'];
-    if (hasBody) reqHeaders['Content-Length'] = Buffer.byteLength(body);
-
-    const req = https.request(
-      {
-        hostname: urlObj.hostname,
-        path:     urlObj.pathname + urlObj.search,
-        method:   upperMethod,
-        headers:  reqHeaders,
-      },
-      (res) => {
-        let data = '';
-        res.on('data', (chunk) => { data += chunk; });
-        res.on('end',  () => resolve({
-          status:          res.statusCode ?? 0,
-          body:            data,
-          responseHeaders: res.headers as Record<string, string | string[]>,
-        }));
-      },
-    );
-    req.on('error', reject);
-    if (hasBody) req.write(body);
-    req.end();
   });
 }

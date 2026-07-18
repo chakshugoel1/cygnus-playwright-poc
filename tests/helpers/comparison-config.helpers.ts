@@ -87,24 +87,24 @@ export type RunMode = 'both' | 'source' | 'target';
  */
 export const PAIRS: ReportPair[] = [
   {
-    name: 'Cygnus',
+    name: 'Power BI Report',
     // Import mode (EXPECTED) — current Cygnus report.
     source: {
-      tenantId:  '8b87af7d-8647-4dc7-8df4-5f69a2011bb5',
-      groupId:   '087ae424-1e86-4979-b65c-f2f610aeb5a7',
-      reportId:  'a2a92634-3f0a-437a-ac86-c332a2eac7de',
-      datasetId: '050de212-5f33-4beb-8a6f-8f64b3f2fccd',
-      rlsRole:   'DynamicRoles',
+      tenantId:  '',
+      groupId:   '',
+      reportId:  '',
+      datasetId: '',
+      rlsRole:   '',
     },
     // Direct Lake (ACTUAL) — FILL THESE IN with the migrated report's IDs.
     target: {
-      tenantId:  '8b87af7d-8647-4dc7-8df4-5f69a2011bb5',
-      groupId:   '087ae424-1e86-4979-b65c-f2f610aeb5a7',
-      reportId:  'a2a92634-3f0a-437a-ac86-c332a2eac7de',
-      datasetId: '050de212-5f33-4beb-8a6f-8f64b3f2fccd',
-      rlsRole:   'DynamicRoles',
+      tenantId:  '',
+      groupId:   '',
+      reportId:  '',
+      datasetId: '',
+      rlsRole:   '',
     },
-     pages: ['Employee', 'Manager', 'DU Head', 'CXO'],   // optional: only these tabs
+     pages: ['CXO'],   // optional: only these tabs
     // pageMap: { 'DU Head': 'DU-Head' }, // optional: renamed tabs
   },
 ];
@@ -160,12 +160,24 @@ function getRuntimePair(): ReportPair | null {
 // ── Placeholder detection (so a half-configured pair fails clearly, early) ────
 const PLACEHOLDER_RE = /^REPLACE_WITH_/i;
 
+/**
+ * A field only counts as configured if it's non-empty AND not the literal
+ * REPLACE_WITH_ placeholder text. An empty string previously passed this
+ * check silently (it doesn't match /^REPLACE_WITH_/), so a blanked-out
+ * PAIRS entry (e.g. scrubbed before pushing to a public repo) would slip
+ * past this guard and fail later with a much more confusing error deep
+ * inside the embed/API layer instead of here, up front.
+ */
+function fieldIsConfigured(value: string): boolean {
+  return value.trim().length > 0 && !PLACEHOLDER_RE.test(value);
+}
+
 export function identityIsConfigured(id: ReportIdentity): boolean {
   return (
-    !PLACEHOLDER_RE.test(id.tenantId) &&
-    !PLACEHOLDER_RE.test(id.groupId) &&
-    !PLACEHOLDER_RE.test(id.reportId) &&
-    !PLACEHOLDER_RE.test(id.datasetId)
+    fieldIsConfigured(id.tenantId) &&
+    fieldIsConfigured(id.groupId) &&
+    fieldIsConfigured(id.reportId) &&
+    fieldIsConfigured(id.datasetId)
   );
 }
 
@@ -215,7 +227,7 @@ export function buildReportUrl(id: ReportIdentity): string {
  * (getPocConfig → getReportMetadata → embed) targets THIS report.
  *
  * It sets the HIGHEST-precedence variables getPocConfig() reads, so this wins
- * regardless of what a local ~/.askme-poc-secrets/.env contains. Because
+ * regardless of what a local ~/Power_BI_report_validation_credentials/.env contains. Because
  * getPocConfig() is not cached and pbi-api reads group/report IDs fresh per
  * call, the switch takes effect immediately for the next export stage.
  */

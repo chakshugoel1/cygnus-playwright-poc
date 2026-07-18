@@ -15,13 +15,15 @@
 import * as fs   from 'fs';
 import * as path from 'path';
 import type { Page } from '@playwright/test';
-import { getReportMetadata, generateEmbedToken, generateEmbedTokenWithSP, getClusterDetails, proxyHttpsRequest, extractEmailFromToken, extractUserTokenFromBrowser, getPbiAccessToken, type EmbedTokenResult } from './pbi-api.helpers';
+import { getReportMetadata, generateEmbedTokenWithSP, getClusterDetails, extractEmailFromToken, extractUserTokenFromBrowser, getPbiAccessToken } from './pbi-api.helpers';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 export interface ReportPage {
   name:        string;   // internal Power BI page name (used for setPage)
   displayName: string;   // human-readable name shown in the report
+  /** 0 = normal/visible, 1 = hidden (tooltip pages, drillthrough targets, etc). */
+  visibility?: number;
 }
 
 export interface RawVisualExport {
@@ -42,6 +44,39 @@ export interface VisualExport {
   rows:         Record<string, string>[];
   rowCount:     number;
   errorMessage: string | null;
+}
+
+/** A slicer's binding target — either a plain column or a hierarchy level. */
+export interface SlicerTarget {
+  table?:          string;
+  column?:         string;
+  hierarchy?:      string;
+  hierarchyLevel?: string;
+  [key: string]:   unknown;
+}
+
+/** Raw slicer info as returned by the browser-side __listPageSlicers(). */
+export interface RawSlicerInfo {
+  name:         string;
+  title:        string;
+  type:         string;         // "slicer" | "advancedSlicer"
+  kind:         'flat' | 'tree';
+  targets:      SlicerTarget[];
+  selected:     string[];
+  errorMessage: string | null;
+}
+
+/** A discovered slicer, enriched with its full available option list. */
+export interface DiscoveredSlicer {
+  name:         string;         // Power BI visual name (stable id used to set state)
+  title:        string;         // human-readable slicer title
+  kind:         'flat' | 'tree';
+  targetLabel:  string;         // e.g. "Employee.Department" — for display
+  targets:      SlicerTarget[]; // raw binding data — needed for the global-filter fast path
+  options:      string[];       // full available values (flat slicers only)
+  selected:     string[];       // currently-selected values
+  isHierarchy:  boolean;        // true for tree/BU-DU style slicers
+  errorMessage: string | null;  // non-null if this slicer couldn't be read
 }
 
 // ── Harness page URL (served by Playwright via page.route — no real HTTP server) ────────────────
@@ -337,35 +372,221 @@ export async function exportCurrentPageVisuals(page: Page): Promise<VisualExport
   });
 }
 
+// ── Slicer helpers ──────────────────────────────────────────────────────────
+//
+// These power both the "Discover Filters" UI step and the actual filtered
+// runs. The cascading/hierarchy behaviour is handled WITHOUT any hard-coded
+// knowledge of which slicer depends on which: we always read a slicer's
+// options fresh, in page order, right before we need them — so a dependent
+// slicer (e.g. Department under BU/DU) is naturally read only AFTER its
+// parents are set, and Power BI has already narrowed its options by then.
+
+const SLICER_SETTLE_MS     = 4000; // wait for the page to redraw after a selection
+const SLICER_READ_RETRY_MS = 1500; // pause before retrying an empty options read
+const SLICER_READ_PACE_MS  = 400;  // pause between consecutive slicer reads during discovery
+
+function targetLabel(targets: SlicerTarget[]): string {
+  if (!targets || targets.length === 0) return '(unknown)';
+  const one = (t: SlicerTarget) => t.hierarchy
+    ? `${t.table ?? '?'}.${t.hierarchy}${t.hierarchyLevel ? ' › ' + t.hierarchyLevel : ''}`
+    : `${t.table ?? '?'}.${t.column ?? '?'}`;
+  return targets.map(one).join('  +  ');
+}
+
 /**
- * Convenience wrapper: navigate to a page by displayName and export all visuals.
- * Finds the page whose displayName matches (case-insensitive partial match).
- *
- * @param page         Playwright page with harness loaded
- * @param displayName  Report page display name (e.g. "Manager", "Employee")
+ * Lists the slicers on the currently active page WITHOUT their option lists
+ * (fast — just bindings + current selection). Used as the first step of
+ * discovery, and to check what's selected.
  */
-export async function exportVisualsForTab(
-  page: Page,
-  displayName: string,
-): Promise<{ page: ReportPage | null; visuals: VisualExport[] }> {
-  const pages = await getReportPages(page);
+export async function listPageSlicers(page: Page): Promise<RawSlicerInfo[]> {
+  return page.evaluate((): Promise<RawSlicerInfo[]> => {
+    return (window as any).__listPageSlicers();
+  });
+}
 
-  // Try exact match first, then case-insensitive partial
-  const target =
-    pages.find(p => p.displayName === displayName) ??
-    pages.find(p => p.displayName.toLowerCase().includes(displayName.toLowerCase()));
+/**
+ * Reads a single flat slicer's full list of available option values by
+ * exporting the slicer visual's own data. Returns [] for tree slicers (whose
+ * options are hierarchical and read differently) or on any export error.
+ */
+export async function readSlicerOptions(page: Page, visualName: string): Promise<string[]> {
+  const attempt = async (): Promise<string[]> => {
+    const raw = await page.evaluate((name: string) => {
+      return (window as any).__exportSingleVisual(name);
+    }, visualName);
 
-  if (!target) {
-    console.warn(`[harness] Page "${displayName}" not found. Available: ${pages.map(p => p.displayName).join(', ')}`);
-    return { page: null, visuals: [] };
+    if (!raw || !raw.csvData) return [];
+    const { rows } = parseVisualCsv(raw.csvData as string);
+    // A slicer's export is a single-column list of its values. Take the first
+    // column of each row, dedupe, drop blanks.
+    const seen = new Set<string>();
+    const options: string[] = [];
+    for (const r of rows) {
+      const first = Object.values(r)[0];
+      const val = (first ?? '').toString().trim();
+      if (val && !seen.has(val)) { seen.add(val); options.push(val); }
+    }
+    return options;
+  };
+
+  const first = await attempt();
+  if (first.length > 0) return first;
+
+  // Empty on the first try is ambiguous — it might genuinely have no data, or
+  // it might be a transient throttling/timing hiccup from reading many
+  // slicers back-to-back (observed in practice on pages with 15+ slicers:
+  // exportData() succeeds with no error but returns nothing). One retry after
+  // a short pause resolves that case cheaply; a page that's genuinely empty
+  // just stays empty and costs one extra short wait.
+  await page.waitForTimeout(SLICER_READ_RETRY_MS);
+  return attempt();
+}
+
+/**
+ * Applies a value selection to a flat slicer, then waits for the page to
+ * redraw. Pass the Power BI visual `name` (from listPageSlicers), not the
+ * title. Selecting multiple values acts as an OR (Power BI "In" operator).
+ */
+export async function setSlicerSelection(
+  page: Page, visualName: string, values: string[],
+  isHierarchy?: boolean, targets?: SlicerTarget[],
+): Promise<void> {
+  await page.evaluate(({ name, vals, hier, tgts }: { name: string; vals: string[]; hier?: boolean; tgts?: SlicerTarget[] }) => {
+    return (window as any).__setSlicerSelection(name, vals, hier, tgts);
+  }, { name: visualName, vals: values, hier: isHierarchy, tgts: targets });
+  await page.waitForTimeout(SLICER_SETTLE_MS);
+}
+
+/**
+ * Full discovery for the active page: lists every slicer and, for each flat
+ * slicer, reads its available options. Tree/hierarchy slicers are reported
+ * with isHierarchy=true and an empty options list (the UI shows them as a
+ * drill-in picker rather than a flat dropdown; deeper levels are read
+ * step-by-step as parent levels are chosen, by calling setSlicerSelection on
+ * the parent then readSlicerOptions on the child).
+ *
+ * IMPORTANT ordering note: this reads options in the slicer order returned by
+ * Power BI. If a page has cascading slicers and you want a dependent slicer's
+ * *narrowed* options, set the parent selection(s) first (setSlicerSelection)
+ * and then call readSlicerOptions on the child — do not rely on this bulk
+ * call to pre-narrow, since at discovery time nothing is selected yet.
+ */
+export async function discoverPageSlicers(page: Page): Promise<DiscoveredSlicer[]> {
+  const raw = await listPageSlicers(page);
+  const out: DiscoveredSlicer[] = [];
+
+  for (let i = 0; i < raw.length; i++) {
+    const s = raw[i];
+    const isHierarchy = s.kind === 'tree';
+    let options: string[] = [];
+    if (!s.errorMessage) {
+      try {
+        // Works for hierarchy slicers too: readSlicerOptions() takes the
+        // FIRST column of each exported row and dedupes — for a hierarchy
+        // export that first column IS the top-level value (confirmed from a
+        // real BU/DU/DU-Detail export: rows come back as
+        // ('BPS','BPS',null), ('Business Enablers','Business Enablers','CSR'),
+        // etc. — column 1 dedupes to exactly the top-level set). This gives
+        // the top-level picker real values instead of an empty list, at no
+        // extra cost — same one read either way.
+        options = await readSlicerOptions(page, s.name);
+      } catch (e) {
+        // Non-fatal: report the slicer with no options rather than aborting
+        // discovery for the whole page.
+        options = [];
+      }
+      // Small pace between reads — reading many slicers back-to-back with zero
+      // delay is what produced empty (but error-free) results on dense pages
+      // in practice. Skipped after the last slicer.
+      if (i < raw.length - 1) await page.waitForTimeout(SLICER_READ_PACE_MS);
+    }
+    if (isHierarchy && options.length === 0 && !s.errorMessage) {
+      // Not necessarily wrong — see the "column 1 dedupe" note above — but a
+      // hierarchy slicer reporting zero top-level options usually means either
+      // a genuinely empty field or a top-level row with a blank first column,
+      // which this dedupe approach can't distinguish. Flag it so a scenario
+      // author investigates rather than assuming "no options" is the truth.
+      console.warn(`[harness]   ⚠ hierarchy slicer "${s.title}" (${s.name}) returned 0 top-level options — verify manually before assuming this field has none.`);
+    }
+    out.push({
+      name:         s.name,
+      title:        s.title,
+      kind:         s.kind,
+      targetLabel:  targetLabel(s.targets),
+      targets:      s.targets,
+      options,
+      selected:     s.selected,
+      isHierarchy,
+      errorMessage: s.errorMessage,
+    });
   }
+  return out;
+}
 
-  console.log(`[harness] Navigating to page "${target.displayName}" (${target.name})`);
-  await setReportPage(page, target.name);
+// ── Report-level (global) filtering ─────────────────────────────────────────
+//
+// Applies a filter once, at the report level, instead of once per page via a
+// slicer visual. Only valid for flat/Basic-filter fields — Power BI's Hierarchy
+// filter type is rejected outright by report.setFilters() (confirmed against
+// the real SDK source), so hierarchy fields must keep using setSlicerSelection.
+// The caller (report-parity.spec.ts) decides WHEN this is eligible; these are
+// just the primitive calls (setGlobalFieldFilters is defined further below,
+// alongside setPageFieldFilters — both take arrays for the same reason).
 
-  const visuals = await exportCurrentPageVisuals(page);
-  const dataCount = visuals.filter(v => v.rowCount > 0).length;
-  console.log(`[harness] Exported ${visuals.length} visuals — ${dataCount} with data`);
+/** Clears all report-level filters (used between scenarios). */
+export async function clearGlobalFilters(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    return (window as any).__clearGlobalFilters();
+  });
+  await page.waitForTimeout(SLICER_SETTLE_MS);
+}
 
-  return { page: target, visuals };
+// ── Global filter check + field-based per-page filtering ────────────────────
+
+/** A report-level filter as read back by getGlobalFilters(). */
+export interface GlobalFilterInfo {
+  target: SlicerTarget;
+  values: string[] | null;
+  hierarchyData: unknown | null;
+  filterType: number;
+}
+
+/**
+ * Fast check for report-level filters ("Filters on all pages") — one call, no
+ * page navigation, works regardless of how many pages the report has. Returns
+ * [] for reports that repeat the same field as an independent slicer on every
+ * page instead (Cygnus's pattern) — that's not detectable this way, only by
+ * reading pages individually.
+ */
+export async function getGlobalFilters(page: Page): Promise<GlobalFilterInfo[]> {
+  return page.evaluate((): Promise<GlobalFilterInfo[]> => {
+    return (window as any).__getGlobalFilters();
+  });
+}
+
+/**
+ * Applies Basic filters to every page in the report in one call. Takes an
+ * ARRAY — always pass every field intended for this scope together, never
+ * call this once per field: report.setFilters() REPLACES the whole filter
+ * set each time, so a second call would silently wipe out the first.
+ */
+export async function setGlobalFieldFilters(page: Page, specs: Array<{ target: SlicerTarget; values: string[] }>): Promise<void> {
+  await page.evaluate((s: Array<{ target: SlicerTarget; values: string[] }>) => {
+    return (window as any).__setGlobalFilters(s);
+  }, specs);
+  await page.waitForTimeout(SLICER_SETTLE_MS);
+}
+
+/**
+ * Applies Basic filters to the CURRENTLY ACTIVE page via page.setFilters() —
+ * no slicer visual required, just each field's table/column. Caller must have
+ * already navigated to the target page (setReportPage) before calling this.
+ * Takes an ARRAY for the same reason as setGlobalFieldFilters above — always
+ * pass every field-based selection for a page together, never one at a time.
+ */
+export async function setPageFieldFilters(page: Page, specs: Array<{ target: SlicerTarget; values: string[] }>): Promise<void> {
+  await page.evaluate((s: Array<{ target: SlicerTarget; values: string[] }>) => {
+    return (window as any).__setPageFieldFilters(s);
+  }, specs);
+  await page.waitForTimeout(SLICER_SETTLE_MS);
 }
