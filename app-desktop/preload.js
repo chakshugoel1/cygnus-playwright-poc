@@ -1,6 +1,7 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('cygnusDesktop', {
+  getAuthStatus: () => ipcRenderer.invoke('get-auth-status'),
   runSetup: () => ipcRenderer.invoke('run-setup'),
   runParity: (config) => ipcRenderer.invoke('run-parity', config),
   runSetupAndParity: (config) => ipcRenderer.invoke('run-setup-and-parity', config),

@@ -10,10 +10,8 @@ param(
   [string]$Destination = "$env:USERPROFILE\cygnus-playwright-poc",
   [ValidateSet('full', 'fast', 'verify', 'repair')]
   [string]$Mode = 'full',
-  [switch]$SkipDesktop,
-  [switch]$InstallDesktop,
-  [switch]$SkipAuthSetup,
-  [switch]$SkipParity,
+  [switch]$RunAuthSetup,
+  [switch]$RunParity,
   [switch]$NonInteractive
 )
 
@@ -97,10 +95,8 @@ if (-not (Test-Path -LiteralPath $installScript)) {
 }
 
 $installerArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $installScript, '-Mode', $Mode)
-if ($SkipDesktop) { $installerArgs += '-SkipDesktop' }
-if ($InstallDesktop) { $installerArgs += '-InstallDesktop' }
-if ($SkipAuthSetup) { $installerArgs += '-SkipAuthSetup' }
-if ($SkipParity) { $installerArgs += '-SkipParity' }
+if ($RunAuthSetup) { $installerArgs += '-RunAuthSetup' }
+if ($RunParity) { $installerArgs += '-RunParity' }
 if ($NonInteractive) { $installerArgs += '-NonInteractive' }
 
 Write-Section 'Running project installer'

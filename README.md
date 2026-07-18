@@ -69,8 +69,8 @@ What it does in phase 1:
 - checks/installs Node LTS and Git via `winget` (if missing)
 - installs root npm dependencies
 - installs Playwright Chromium
-- creates `%USERPROFILE%\.askme-poc-secrets`
-- creates `%USERPROFILE%\.askme-poc-secrets\.env` and `pbi-service-principal.json` from templates if missing
+- creates `%USERPROFILE%\Power_BI_report_validation_credentials`
+- creates `%USERPROFILE%\Power_BI_report_validation_credentials\.env` and `pbi-service-principal.json` from templates if missing
 - runs `npm run test:setup` once if credentials exist and auth session is missing
 - runs `npm run parity` as a smoke check (unless skipped)
 - optionally installs `app-desktop` dependencies
@@ -133,14 +133,14 @@ Credentials live **outside** this project folder, at a fixed path, so they're
 never accidentally committed or synced to OneDrive/Git:
 
 ```
-%USERPROFILE%\.askme-poc-secrets\
+%USERPROFILE%\Power_BI_report_validation_credentials\
 ```
 
 Create that folder if it doesn't exist yet.
 
 ### Step 5 — Add the two credential files
 
-**`%USERPROFILE%\.askme-poc-secrets\.env`**
+**`%USERPROFILE%\Power_BI_report_validation_credentials\.env`**
 ```
 E2E_USERNAME=your.name@sopra-steria.com
 E2E_PASSWORD=your-password
@@ -148,7 +148,7 @@ E2E_PASSWORD=your-password
 This is a dedicated test account used to log in to Cygnus automatically — not
 your personal MFA-protected account.
 
-**`%USERPROFILE%\.askme-poc-secrets\pbi-service-principal.json`**
+**`%USERPROFILE%\Power_BI_report_validation_credentials\pbi-service-principal.json`**
 ```json
 {
   "tenantId": "<from IT>",
@@ -268,7 +268,7 @@ $env:PAIR='Cygnus'; npm run parity
 ### Troubleshooting
 
 - **`npm run test:setup` fails immediately** — check `.env` exists at
-  `%USERPROFILE%\.askme-poc-secrets\.env` with `E2E_USERNAME` and
+  `%USERPROFILE%\Power_BI_report_validation_credentials\.env` with `E2E_USERNAME` and
   `E2E_PASSWORD` set.
 - **A parity run fails with an HTTP 401/403 fetching report metadata** —
   usually the service principal credentials in `pbi-service-principal.json`

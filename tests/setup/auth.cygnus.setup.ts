@@ -4,12 +4,12 @@ import * as fs from 'fs';
 import * as dotenv from 'dotenv';
 import { clickSubmit } from '../helpers/auth.helpers';
 
-dotenv.config({ path: path.join(process.env['USERPROFILE'] ?? process.env['HOME'] ?? '', '.askme-poc-secrets', '.env') });
+dotenv.config({ path: path.join(process.env['USERPROFILE'] ?? process.env['HOME'] ?? '', 'Power_BI_report_validation_credentials', '.env') });
 
 // Power BI auth can be slow on first load
 setup.setTimeout(180_000);
 
-const authDir  = path.join(process.env['USERPROFILE'] ?? process.env['HOME'] ?? '', '.askme-poc-secrets', '.auth');
+const authDir  = path.join(process.env['USERPROFILE'] ?? process.env['HOME'] ?? '', 'Power_BI_report_validation_credentials', '.auth');
 const authFile = path.join(authDir, 'cygnus.user.json');
 
 import { CYGNUS_WORKSPACE_URL } from '../helpers/cygnus.helpers';

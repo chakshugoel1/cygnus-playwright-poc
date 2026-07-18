@@ -23,6 +23,15 @@
  *    DISCOVER_ALL_PAGES=1 npm run discover:slicers
  *        → old bulk behavior: crawl every page except probable tooltip pages.
  *          Slow on a page-heavy report — see the timeout note below.
+ *    DISCOVER_FIRST_MATCH=1 npm run discover:slicers
+ *        → no pages named: walk pages in order (skipping likely tooltip
+ *          pages) and crawl only the FIRST one that actually has slicers,
+ *          then stop. Most reports repeat the same fields across pages, so
+ *          one representative page is usually enough — far cheaper than
+ *          DISCOVER_ALL_PAGES. Flat fields found this way still apply to
+ *          every other page in a later run (targets-based, no visual needed
+ *          there); a hierarchy field found here only ever applies back to
+ *          THIS page, since its visual only exists here.
  *    DISCOVER_SIDE=target npm run discover:slicers
  *        → discover on the target (Direct Lake) report instead of source.
  *
@@ -66,6 +75,7 @@ const SIDE = ((process.env['DISCOVER_SIDE'] ?? 'source').trim().toLowerCase() ==
 const PAGES_CSV = (process.env['DISCOVER_PAGES'] ?? process.env['DISCOVER_PAGE'] ?? '').trim();
 const NAMED_PAGES = PAGES_CSV ? PAGES_CSV.split(',').map(s => s.trim()).filter(Boolean) : [];
 const CRAWL_ALL = (process.env['DISCOVER_ALL_PAGES'] ?? '').trim() === '1';
+const FIRST_MATCH = (process.env['DISCOVER_FIRST_MATCH'] ?? '').trim() === '1';
 const INCLUDE_HIDDEN = (process.env['DISCOVER_INCLUDE_HIDDEN'] ?? '').trim() === '1';
 
 const OUT_DIR  = path.join(process.cwd(), 'playwright-report-parity', PAIR.name);
@@ -73,6 +83,33 @@ const OUT_JSON = path.join(OUT_DIR, 'discovered-slicers.json');
 
 function looksLikeTooltipPage(name: string): boolean {
   return /tooltip/i.test(name);
+}
+
+/** Shared print block for one page's discovered slicers — used by both the
+ * named/all-pages crawl loop and the first-match scan below. */
+function logPageSlicers(slicers: DiscoveredSlicer[]): void {
+  if (slicers.length === 0) {
+    console.log('      (no slicers on this page)');
+    return;
+  }
+  for (const s of slicers) {
+    console.log(`      • "${s.title}"  [${s.kind}${s.isHierarchy ? ' — HIERARCHY' : ''}]`);
+    console.log(`          visualName : ${s.name}`);
+    console.log(`          bound to   : ${s.targetLabel}`);
+    if (s.errorMessage) {
+      console.log(`          ⚠ could not fully read: ${s.errorMessage}`);
+    } else {
+      const preview = s.options.slice(0, 8).join(', ') + (s.options.length > 8 ? `, … (${s.options.length} total)` : '');
+      if (s.isHierarchy) {
+        console.log(`          top-level options: ${preview || '(none found)'} (deeper levels not listed — pick a top-level value first)`);
+      } else {
+        console.log(`          options    : ${preview || '(none found)'}`);
+      }
+    }
+    if (s.selected.length > 0) {
+      console.log(`          currently selected: ${s.selected.join(', ')}`);
+    }
+  }
 }
 
 /** Returns [] when neither named pages nor bulk mode was requested — global check only. */
@@ -166,42 +203,48 @@ test('Discover Slicers', async ({ page }) => {
 
   const pagesResult: Record<string, DiscoveredSlicer[]> = {};
 
-  if (targetPages.length === 0) {
+  if (targetPages.length > 0) {
+    for (const p of targetPages) {
+      console.log(`\n[4] Page "${p.displayName}"`);
+      await setReportPage(page, p.name);
+      await page.waitForTimeout(3_000); // let the page settle before reading visuals
+
+      const slicers = await discoverPageSlicers(page);
+      pagesResult[p.displayName] = slicers;
+      logPageSlicers(slicers);
+    }
+  } else if (FIRST_MATCH) {
+    // No specific pages requested, but the caller wants something useful
+    // without paying for a full-report crawl (DISCOVER_ALL_PAGES). Walk
+    // pages in declared order, skipping likely tooltip pages, and stop at
+    // the first one that actually has slicers — see the module comment for
+    // why one representative page is usually enough.
+    console.log('\n[4] No pages specified — scanning for the first page with slicers...');
+    const candidates = allPages.filter(p => !looksLikeTooltipPage(p.displayName));
+    let matched = false;
+    for (const p of candidates) {
+      console.log(`\n[4]   checking "${p.displayName}"...`);
+      await setReportPage(page, p.name);
+      await page.waitForTimeout(3_000);
+
+      const slicers = await discoverPageSlicers(page);
+      if (slicers.length === 0) {
+        console.log('      (no slicers here, trying next page)');
+        continue;
+      }
+
+      pagesResult[p.displayName] = slicers;
+      console.log(`      found ${slicers.length} slicer(s) — stopping scan.`);
+      logPageSlicers(slicers);
+      matched = true;
+      break;
+    }
+    if (!matched) {
+      console.log('\n    No page with slicers was found while scanning.');
+    }
+  } else {
     console.log('\n[4] No pages requested — skipping page crawl.');
-    console.log('    Set DISCOVER_PAGES="PageA,PageB" to crawl specific pages, or DISCOVER_ALL_PAGES=1 for every page.');
-  }
-
-  for (const p of targetPages) {
-    console.log(`\n[4] Page "${p.displayName}"`);
-    await setReportPage(page, p.name);
-    await page.waitForTimeout(3_000); // let the page settle before reading visuals
-
-    const slicers = await discoverPageSlicers(page);
-    pagesResult[p.displayName] = slicers;
-
-    if (slicers.length === 0) {
-      console.log('      (no slicers on this page)');
-      continue;
-    }
-
-    for (const s of slicers) {
-      console.log(`      • "${s.title}"  [${s.kind}${s.isHierarchy ? ' — HIERARCHY' : ''}]`);
-      console.log(`          visualName : ${s.name}`);
-      console.log(`          bound to   : ${s.targetLabel}`);
-      if (s.errorMessage) {
-        console.log(`          ⚠ could not fully read: ${s.errorMessage}`);
-      } else {
-        const preview = s.options.slice(0, 8).join(', ') + (s.options.length > 8 ? `, … (${s.options.length} total)` : '');
-        if (s.isHierarchy) {
-          console.log(`          top-level options: ${preview || '(none found)'} (deeper levels not listed — pick a top-level value first)`);
-        } else {
-          console.log(`          options    : ${preview || '(none found)'}`);
-        }
-      }
-      if (s.selected.length > 0) {
-        console.log(`          currently selected: ${s.selected.join(', ')}`);
-      }
-    }
+    console.log('    Set DISCOVER_PAGES="PageA,PageB" to crawl specific pages, DISCOVER_FIRST_MATCH=1 for one representative page, or DISCOVER_ALL_PAGES=1 for every page.');
   }
 
   const allPageNames = allPages.map(p => p.displayName);
