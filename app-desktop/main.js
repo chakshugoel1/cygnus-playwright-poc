@@ -1,7 +1,18 @@
 const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 const { spawn, execSync } = require('child_process');
+
+// Read-only check for the saved LOGIN SESSION file that `npm run test:setup`
+// itself creates (see tests/setup/auth.cygnus.setup.ts) - this is NOT the
+// credentials (those live only in .env, entered via the installer, never via
+// this app). Same path install.ps1 already checks with Test-Path.
+const AUTH_FILE = path.join(os.homedir(), 'Power_BI_report_validation_credentials', '.auth', 'cygnus.user.json');
+
+function hasAuthSession() {
+  return fs.existsSync(AUTH_FILE);
+}
 
 function findWorkspaceRoot() {
   const explicitRoot = (process.env.CYGNUS_WORKSPACE_ROOT ?? '').trim();
@@ -249,7 +260,11 @@ async function runDiscoverSlicers(pairName, pagesCsv, identity, side) {
     extraEnv.DISCOVER_PAGES = pages;
     emitLog(`[desktop-runner]   scope: pages [${pages}]`);
   } else {
-    emitLog('[desktop-runner]   scope: global check only (no pages named — add pages to also crawl them)');
+    // No pages typed - one embed still gets something useful: scan pages in
+    // order and crawl only the first one with slicers, instead of either a
+    // silent no-op or a full (slow) all-pages crawl. See discover-slicers.spec.ts.
+    extraEnv.DISCOVER_FIRST_MATCH = '1';
+    emitLog('[desktop-runner]   scope: no pages named - scanning for the first page with slicers');
   }
   await runScript('discover:slicers', extraEnv, 'discover:slicers');
 
@@ -276,6 +291,10 @@ function createWindow() {
 
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
 }
+
+ipcMain.handle('get-auth-status', async () => {
+  return { hasSession: hasAuthSession() };
+});
 
 ipcMain.handle('run-setup', async () => {
   try {

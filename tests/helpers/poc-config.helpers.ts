@@ -17,7 +17,7 @@ const DEFAULT_REPORT_ID = '2ba857e0-e07f-4475-81c4-427cbd95cd9e';
 const DEFAULT_DATASET_ID = 'fbb612a3-0d0f-43c8-b2a7-317d8d59d423';
 const DEFAULT_RLS_ROLE = 'DynamicRoles';
 
-const SECRETS_DIR = path.join(process.env['USERPROFILE'] ?? process.env['HOME'] ?? '', '.askme-poc-secrets');
+const SECRETS_DIR = path.join(process.env['USERPROFILE'] ?? process.env['HOME'] ?? '', 'Power_BI_report_validation_credentials');
 const ENV_FILE = path.join(SECRETS_DIR, '.env');
 
 dotenv.config({ path: ENV_FILE, override: false });

@@ -2,8 +2,8 @@ import { defineConfig } from '@playwright/test';
 import * as path from 'path';
 
 // Credentials live OUTSIDE OneDrive — never synced to cloud.
-// Stored at: %USERPROFILE%\.askme-poc-secrets\
-const SECRETS_DIR = path.join(process.env['USERPROFILE'] ?? process.env['HOME'] ?? '', '.askme-poc-secrets');
+// Stored at: %USERPROFILE%\Power_BI_report_validation_credentials\
+const SECRETS_DIR = path.join(process.env['USERPROFILE'] ?? process.env['HOME'] ?? '', 'Power_BI_report_validation_credentials');
 
 /**
  * Playwright config for Cygnus (Power BI) automation.

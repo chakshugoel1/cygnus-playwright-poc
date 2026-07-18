@@ -160,12 +160,24 @@ function getRuntimePair(): ReportPair | null {
 // ── Placeholder detection (so a half-configured pair fails clearly, early) ────
 const PLACEHOLDER_RE = /^REPLACE_WITH_/i;
 
+/**
+ * A field only counts as configured if it's non-empty AND not the literal
+ * REPLACE_WITH_ placeholder text. An empty string previously passed this
+ * check silently (it doesn't match /^REPLACE_WITH_/), so a blanked-out
+ * PAIRS entry (e.g. scrubbed before pushing to a public repo) would slip
+ * past this guard and fail later with a much more confusing error deep
+ * inside the embed/API layer instead of here, up front.
+ */
+function fieldIsConfigured(value: string): boolean {
+  return value.trim().length > 0 && !PLACEHOLDER_RE.test(value);
+}
+
 export function identityIsConfigured(id: ReportIdentity): boolean {
   return (
-    !PLACEHOLDER_RE.test(id.tenantId) &&
-    !PLACEHOLDER_RE.test(id.groupId) &&
-    !PLACEHOLDER_RE.test(id.reportId) &&
-    !PLACEHOLDER_RE.test(id.datasetId)
+    fieldIsConfigured(id.tenantId) &&
+    fieldIsConfigured(id.groupId) &&
+    fieldIsConfigured(id.reportId) &&
+    fieldIsConfigured(id.datasetId)
   );
 }
 
@@ -215,7 +227,7 @@ export function buildReportUrl(id: ReportIdentity): string {
  * (getPocConfig → getReportMetadata → embed) targets THIS report.
  *
  * It sets the HIGHEST-precedence variables getPocConfig() reads, so this wins
- * regardless of what a local ~/.askme-poc-secrets/.env contains. Because
+ * regardless of what a local ~/Power_BI_report_validation_credentials/.env contains. Because
  * getPocConfig() is not cached and pbi-api reads group/report IDs fresh per
  * call, the switch takes effect immediately for the next export stage.
  */

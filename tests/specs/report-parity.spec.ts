@@ -72,15 +72,17 @@ test.beforeAll(() => {
   if (RUN_SOURCE && !identityIsConfigured(PAIR.source)) {
     throw new Error(
       `\n\n  CONFIG ERROR — pair "${PAIR.name}": the SOURCE (Import mode) report is not configured.\n` +
-      `  Replace the REPLACE_WITH_* placeholders in:\n` +
-      `      tests/helpers/comparison-config.helpers.ts\n`,
+      `  Open the desktop app and enter the Source report's Tenant ID / Group ID / Report ID /\n` +
+      `  Dataset ID, then run Parity from there.\n` +
+      `  (Advanced: a permanent default can also be set in tests/helpers/comparison-config.helpers.ts.)\n`,
     );
   }
   if (RUN_TARGET && !identityIsConfigured(PAIR.target)) {
     throw new Error(
       `\n\n  CONFIG ERROR — pair "${PAIR.name}": the TARGET (Direct Lake) report is not configured.\n` +
-      `  Fill in the target groupId / reportId / datasetId (currently REPLACE_WITH_* placeholders) in:\n` +
-      `      tests/helpers/comparison-config.helpers.ts\n`,
+      `  Open the desktop app and enter the Target report's Tenant ID / Group ID / Report ID /\n` +
+      `  Dataset ID, then run Parity from there.\n` +
+      `  (Advanced: a permanent default can also be set in tests/helpers/comparison-config.helpers.ts.)\n`,
     );
   }
   if (MODE === 'target' && !fs.existsSync(EXPECTED_XLSX)) {

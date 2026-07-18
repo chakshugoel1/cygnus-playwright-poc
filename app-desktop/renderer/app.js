@@ -165,17 +165,33 @@ document.getElementById('btnParity').addEventListener('click', async () => {
     appendLog(`Validation failed: missing ${missing.join(', ')}`);
     return;
   }
+
+  // A saved session-less Parity launch is guaranteed to fail 5+ minutes in,
+  // deep inside token acquisition - exactly the confusing "ran but nothing
+  // worked" experience the installer flow was already fixed to avoid. Check
+  // first and transparently fall back to Auth + Parity instead of letting it
+  // fail.
+  const authStatus = await window.cygnusDesktop.getAuthStatus();
+
   const filterCount = Object.values(cfg.slicerScenario.pages).reduce((n, sels) => n + sels.length, 0);
+  if (!authStatus.hasSession) {
+    appendLog('--- No saved login session found - running Authentication first, then Parity ---');
+  }
   appendLog(filterCount > 0
-    ? `--- Running parity only (${filterCount} filter selection(s) applied) ---`
-    : '--- Running parity only (unfiltered) ---');
+    ? `--- Running parity (${filterCount} filter selection(s) applied) ---`
+    : '--- Running parity (unfiltered) ---');
   if (cfg.applyGlobalFlatFilters) {
     appendLog('--- Flat field filters: apply once at report level (all pages) ---');
   }
   if (cfg.lenientTextCompare) {
     appendLog('--- Lenient text compare enabled (case/space/underscore/hyphen differences ignored) ---');
   }
-  await window.cygnusDesktop.runParity(cfg);
+
+  if (authStatus.hasSession) {
+    await window.cygnusDesktop.runParity(cfg);
+  } else {
+    await window.cygnusDesktop.runSetupAndParity(cfg);
+  }
 });
 
 document.getElementById('btnBoth').addEventListener('click', async () => {
