@@ -275,7 +275,11 @@ async function runParity(config) {
 
 async function runDiscoverSlicers(pairName, pagesCsv, identity, side) {
   emitLog('[desktop-runner] Starting discovery via npm run discover:slicers');
-  const extraEnv = {};
+  // The desktop app skips the report-level ("global") filter check by
+  // default - our reports always come back empty there, and skipping saves
+  // an embed/probe round trip. Set DISCOVER_SKIP_GLOBAL_CHECK=0 via the
+  // system environment before launching the app to re-enable it.
+  const extraEnv = { DISCOVER_SKIP_GLOBAL_CHECK: process.env.DISCOVER_SKIP_GLOBAL_CHECK === '0' ? '0' : '1' };
 
   if (identity) {
     // Mirrors runParity()'s override mechanism: point comparison-config's
@@ -358,6 +362,7 @@ async function runCrossReportDiscovery(pairName, sourceIdentity, targetIdentity)
     CYGNUS_UI_RUNTIME_CONFIG_PATH: DISCOVER_RUNTIME_FILE,
     DISCOVER_SIDE: 'source',
     DISCOVER_FIRST_MATCH: '1',
+    DISCOVER_SKIP_GLOBAL_CHECK: process.env.DISCOVER_SKIP_GLOBAL_CHECK === '0' ? '0' : '1',
     CYGNUS_HIDE_WINDOW: '1',
   }, 'discover:slicers (source)');
   const sourceResult = readResult('source'); // read BEFORE the target run overwrites this same file
@@ -371,6 +376,7 @@ async function runCrossReportDiscovery(pairName, sourceIdentity, targetIdentity)
     CYGNUS_UI_RUNTIME_OVERRIDE: '1',
     CYGNUS_UI_RUNTIME_CONFIG_PATH: DISCOVER_RUNTIME_FILE,
     DISCOVER_SIDE: 'target',
+    DISCOVER_SKIP_GLOBAL_CHECK: process.env.DISCOVER_SKIP_GLOBAL_CHECK === '0' ? '0' : '1',
     CYGNUS_HIDE_WINDOW: '1',
   };
   if (sourcePageName) {

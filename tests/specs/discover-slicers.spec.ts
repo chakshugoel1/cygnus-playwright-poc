@@ -41,6 +41,14 @@
  *          doesn't have a page by that name, silently fall back to a
  *          first-match scan instead of throwing "Page(s) not found". Only
  *          meaningful with exactly one page named.
+ *    DISCOVER_SKIP_GLOBAL_CHECK=1 npm run discover:slicers
+ *        → skip the global (report-level) filter check entirely. Still on
+ *          by default (it's cheap and useful for reports that DO use
+ *          report-level filters) — this is for when you already know YOUR
+ *          report always comes back empty there and don't want to see it
+ *          in the output every time. The desktop app sets this by default
+ *          for its own discovery calls; the raw CLI command above still
+ *          checks unless you set it yourself.
  *
  * Output:
  *    - Printed to console: global filters first, then each crawled page
@@ -86,6 +94,7 @@ const CRAWL_ALL = (process.env['DISCOVER_ALL_PAGES'] ?? '').trim() === '1';
 const FIRST_MATCH = (process.env['DISCOVER_FIRST_MATCH'] ?? '').trim() === '1';
 const FALLBACK_FIRST_MATCH = (process.env['DISCOVER_FALLBACK_FIRST_MATCH'] ?? '').trim() === '1';
 const INCLUDE_HIDDEN = (process.env['DISCOVER_INCLUDE_HIDDEN'] ?? '').trim() === '1';
+const SKIP_GLOBAL_CHECK = (process.env['DISCOVER_SKIP_GLOBAL_CHECK'] ?? '').trim() === '1';
 
 const OUT_DIR  = path.join(process.cwd(), 'playwright-report-parity', PAIR.name);
 const OUT_JSON = path.join(OUT_DIR, 'discovered-slicers.json');
@@ -223,20 +232,25 @@ test('Discover Slicers', async ({ page }) => {
   await loadHarnessPage(page, token);
 
   // ── Step 1: global check — always, fast, no page navigation ──────────────
-  console.log('\n[3] Checking for report-level ("global") filters...');
-  let globalFilters: GlobalFilterInfo[] = [];
-  try {
-    globalFilters = await getGlobalFilters(page);
-  } catch (e) {
-    console.warn(`      ⚠ could not read global filters: ${(e as Error).message}`);
-  }
-  if (globalFilters.length === 0) {
-    console.log('      (none found — this report likely repeats fields as per-page slicers instead; see [4] below)');
+  let globalFilters: GlobalFilterInfo[] | null = [];
+  if (SKIP_GLOBAL_CHECK) {
+    console.log('\n[3] Skipping report-level ("global") filter check (DISCOVER_SKIP_GLOBAL_CHECK=1).');
+    globalFilters = null;
   } else {
-    for (const f of globalFilters) {
-      const t = f.target as any;
-      const label = t?.table && t?.column ? `${t.table}.${t.column}` : JSON.stringify(t);
-      console.log(`      • ${label} → [${(f.values ?? ['(hierarchy selection)']).join(', ')}]`);
+    console.log('\n[3] Checking for report-level ("global") filters...');
+    try {
+      globalFilters = await getGlobalFilters(page);
+    } catch (e) {
+      console.warn(`      ⚠ could not read global filters: ${(e as Error).message}`);
+    }
+    if (globalFilters.length === 0) {
+      console.log('      (none found — this report likely repeats fields as per-page slicers instead; see [4] below)');
+    } else {
+      for (const f of globalFilters) {
+        const t = f.target as any;
+        const label = t?.table && t?.column ? `${t.table}.${t.column}` : JSON.stringify(t);
+        console.log(`      • ${label} → [${(f.values ?? ['(hierarchy selection)']).join(', ')}]`);
+      }
     }
   }
 

@@ -198,7 +198,14 @@ test('Report Parity — Import mode vs Direct Lake data validation', async ({ pa
   const preflightCaveats: string[] = [];
   if (configuredScenarios.length > 0) {
     const flatFieldKey = (t: { table?: string; column?: string }) => `${t.table}${t.column}`;
-    const fields = new Map<string, { table: string; column: string }>();
+    // Tracks which side(s) each field actually needs validating against. A
+    // selection tagged sel.side (from the desktop app's cross-report "shared
+    // picker" - see buildScenarioFromPicks/sideTargets in app.js) only ever
+    // gets applied on that one side, so checking it against the OTHER side's
+    // dataset is meaningless and would wrongly abort a run whose two sides
+    // deliberately use two different table.column bindings for the "same"
+    // (title-matched) filter. An untagged selection still applies to both.
+    const fields = new Map<string, { table: string; column: string; sides: Set<'source' | 'target'> }>();
     let hasHierarchy = false;
     for (const sc of configuredScenarios) {
       for (const sels of Object.values(sc.pages)) {
@@ -206,7 +213,14 @@ test('Report Parity — Import mode vs Direct Lake data validation', async ({ pa
           if (sel.isHierarchy) { hasHierarchy = true; continue; }
           const t = sel.targets?.[0];
           if (sel.targets?.length === 1 && t?.table && t?.column) {
-            fields.set(flatFieldKey(t), { table: t.table, column: t.column });
+            const key = flatFieldKey(t);
+            let entry = fields.get(key);
+            if (!entry) {
+              entry = { table: t.table, column: t.column, sides: new Set() };
+              fields.set(key, entry);
+            }
+            if (sel.side === 'source' || sel.side === 'target') entry.sides.add(sel.side);
+            else { entry.sides.add('source'); entry.sides.add('target'); }
           }
         }
       }
@@ -214,15 +228,16 @@ test('Report Parity — Import mode vs Direct Lake data validation', async ({ pa
 
     if (fields.size > 0) {
       console.log(`\n[preflight] Validating ${fields.size} filter field(s) against ${runSource && runTarget ? 'both datasets' : 'the dataset in scope'}...`);
-      const sides: Array<[string, string]> = [];
-      if (runSource) sides.push(['SOURCE', pair.source.datasetId]);
-      if (runTarget) sides.push(['TARGET', pair.target.datasetId]);
+      const sides: Array<[string, 'source' | 'target', string]> = [];
+      if (runSource) sides.push(['SOURCE', 'source', pair.source.datasetId]);
+      if (runTarget) sides.push(['TARGET', 'target', pair.target.datasetId]);
 
       const missingKeys = new Set<string>();
       const missingDescriptions: string[] = [];
       const unknownSides = new Set<string>();
       for (const [key, f] of fields) {
-        for (const [sideName, dsId] of sides) {
+        for (const [sideName, sideKey, dsId] of sides) {
+          if (!f.sides.has(sideKey)) continue; // this field's selection(s) were never tagged for this side
           const res = await validateDatasetField(token, dsId, f.table, f.column);
           if (res.status === 'missing') {
             missingKeys.add(key);

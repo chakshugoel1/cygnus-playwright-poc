@@ -284,6 +284,7 @@ function getOrCreatePick(picksMap, key, group) {
     pick.targetLabel = group.targetLabel;
     pick.targets = group.targets;
     pick.byPage = group.byPage;
+    pick.sideTargets = group.sideTargets;
     if (group.options.length > pick.options.length) pick.options = group.options;
   }
   return pick;
@@ -327,6 +328,30 @@ function buildScenarioFromPicks(pageScope) {
     for (const pick of picksMap.values()) {
       if (!pick.value) continue;
       for (const pageName of pageScope) {
+        if (pick.sideTargets && !side) {
+          // Shared picker for a cross-report "identical" match: one VALUE
+          // picked once, but each side's underlying table.column binding can
+          // differ (e.g. a Direct Lake migration renamed the table) even
+          // though the on-screen slicer TITLE is identical - matching by
+          // title never guaranteed matching bindings. Emitting the source
+          // side's targets for both sides is exactly what produced the
+          // FILTER FIELD MISMATCH abort (and, before that check existed, a
+          // silent one-sided-only filter). Each side must use its OWN
+          // discovered targets.
+          for (const s of ['source', 'target']) {
+            const sd = pick.sideTargets[s];
+            if (!sd) continue;
+            const sel = { title: pick.title, values: [pick.value], targets: sd.targets, side: s };
+            if (pick.isHierarchy) {
+              const onThisPage = sd.byPage[pageName];
+              if (!onThisPage) continue;
+              sel.isHierarchy = true;
+              sel.visualName = onThisPage.visualName;
+            }
+            scenario.pages[pageName].push(sel);
+          }
+          continue;
+        }
         const sel = { title: pick.title, values: [pick.value], targets: pick.targets };
         if (side) sel.side = side; // undefined = applies to both sides, as always
         if (pick.isHierarchy) {
@@ -550,6 +575,81 @@ function renderDiscoverResults(data) {
 }
 
 /**
+ * Cross-report mode: source and target discovered the SAME filter titles
+ * (matchDetails.identical), so the user only picks a value once - one
+ * shared control per field, not two columns. BUT "same title" does not mean
+ * "same underlying table.column": a Direct Lake migration can rename the
+ * table backing a field while the on-screen slicer title stays identical
+ * (observed in production - a field titled the same on both reports bound
+ * to 'Germany - Extract'[Recruitment Area] on the source and to
+ * 'V_FACT_APPLICATION_GERMANY'[RECRUITMENT_AREA] on the target). Reusing
+ * just one side's targets for both reports is exactly what produced a
+ * FILTER FIELD MISMATCH abort (previously, before that check existed, a
+ * silently one-sided filter). So each merged pick keeps BOTH sides'
+ * targets/visualNames (sideTargets), and buildScenarioFromPicks emits two
+ * side-tagged selections from the one shared value - see there.
+ */
+function renderMatchedDiscoverResults(result) {
+  window._discoverMode = 'shared';
+  _lastGlobalFilters = [];
+  const sourcePage = result.sourcePage;
+  const targetPage = result.targetPage;
+
+  renderGlobalFilters(null);
+  renderPageScopeSelector(getPageUniverse());
+
+  const sourceGroups = groupDiscoveredFields(sourcePage ? { [sourcePage]: result.sourceFields || [] } : {});
+  const targetGroups = groupDiscoveredFields(targetPage ? { [targetPage]: result.targetFields || [] } : {});
+
+  // Pair up by normalized title - matchDetails.identical already guarantees
+  // every source field has exactly one title+hierarchy-ness counterpart in
+  // target and vice versa (see matchDiscoveredFields in
+  // cross-report-match.helpers.ts), so this pairing cannot come up empty on
+  // either side or hit a hierarchy-ness mismatch.
+  const targetGroupsByTitleKey = new Map();
+  for (const g of targetGroups.values()) targetGroupsByTitleKey.set(pageNameKeyJs(g.title), g);
+
+  const container = document.getElementById('discoverResults');
+  container.innerHTML = '';
+
+  const merged = [];
+  for (const sourceGroup of sourceGroups.values()) {
+    const targetGroup = targetGroupsByTitleKey.get(pageNameKeyJs(sourceGroup.title));
+    if (!targetGroup) continue; // should not happen when result.identical is true
+    merged.push({ key: fieldKey(sourceGroup.title, sourceGroup.targetLabel), sourceGroup, targetGroup });
+  }
+
+  if (merged.length === 0) {
+    container.innerHTML = '<div class="note">No pages were crawled for slicer visuals yet. Add one or more pages and Discover again to build pickable filters.</div>';
+    return;
+  }
+
+  const heading = document.createElement('div');
+  heading.className = 'section-title';
+  heading.style.marginTop = '4px';
+  heading.textContent = 'Pick values to apply on your selected pages (applied separately to each report\'s own fields):';
+  container.appendChild(heading);
+
+  for (const { key, sourceGroup, targetGroup } of merged) {
+    const sameLabel = sourceGroup.targetLabel === targetGroup.targetLabel;
+    const group = {
+      title: sourceGroup.title,
+      isHierarchy: sourceGroup.isHierarchy,
+      targetLabel: sameLabel
+        ? sourceGroup.targetLabel
+        : `${sourceGroup.targetLabel}  (target report: ${targetGroup.targetLabel})`,
+      options: sourceGroup.options.length >= targetGroup.options.length ? sourceGroup.options : targetGroup.options,
+      sideTargets: {
+        source: { targets: sourceGroup.targets, byPage: sourceGroup.byPage },
+        target: { targets: targetGroup.targets, byPage: targetGroup.byPage },
+      },
+    };
+    const pick = getOrCreatePick(window._filterPicks, key, group);
+    container.appendChild(renderFieldPicker(key, pick));
+  }
+}
+
+/**
  * Cross-report mode: source and target discovered DIFFERENT filters (or a
  * flat-vs-hierarchy mismatch on a same-named field), so a single shared
  * picker would be wrong - render two independent columns instead, with
@@ -632,11 +732,7 @@ document.getElementById('btnDiscover').addEventListener('click', async () => {
 
     if (result.identical) {
       appendLog(`--- Filters match between reports (page "${result.sourcePage}") — one shared picker ---`);
-      renderDiscoverResults({
-        globalFilters: null,
-        pages: result.sourcePage ? { [result.sourcePage]: result.sourceFields } : {},
-        allPages: _discoveredPages,
-      });
+      renderMatchedDiscoverResults(result);
     } else {
       appendLog('--- Filters do NOT match between reports — select values separately below ---');
       renderSplitDiscoverResults(result);
