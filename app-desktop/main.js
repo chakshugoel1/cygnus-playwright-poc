@@ -14,6 +14,51 @@ function hasAuthSession() {
   return fs.existsSync(AUTH_FILE);
 }
 
+// Mirrors tests/helpers/report-export.helpers.ts's pageNameKey and
+// tests/helpers/cross-report-match.helpers.ts's matchDiscoveredFields EXACTLY
+// (same normalization + matching rules). Duplicated here because this file
+// is plain Node.js with no TypeScript compilation step, so it can't import
+// those .ts helpers directly. The .ts versions are the ones covered by unit
+// tests (tests/unit/cross-report-match.unit.spec.ts) - keep both in sync if
+// either changes.
+function pageNameKeyJs(name) {
+  return String(name || '').trim().toLowerCase().replace(/[\s_-]+/g, '');
+}
+
+function matchDiscoveredFieldsJs(sourceFields, targetFields) {
+  const bySourceKey = new Map();
+  for (const f of sourceFields || []) {
+    const key = pageNameKeyJs(f.title);
+    if (!bySourceKey.has(key)) bySourceKey.set(key, f);
+  }
+  const byTargetKey = new Map();
+  for (const f of targetFields || []) {
+    const key = pageNameKeyJs(f.title);
+    if (!byTargetKey.has(key)) byTargetKey.set(key, f);
+  }
+
+  const matchedTitles = [];
+  const hierarchyMismatch = [];
+  const onlyInSource = [];
+
+  for (const [key, srcField] of bySourceKey) {
+    const tgtField = byTargetKey.get(key);
+    if (!tgtField) { onlyInSource.push(srcField.title); continue; }
+    if (Boolean(srcField.isHierarchy) !== Boolean(tgtField.isHierarchy)) { hierarchyMismatch.push(srcField.title); continue; }
+    matchedTitles.push(srcField.title);
+  }
+
+  const matchedKeys = new Set([...matchedTitles, ...hierarchyMismatch].map(pageNameKeyJs));
+  const onlyInTarget = Array.from(byTargetKey.entries())
+    .filter(([key]) => !matchedKeys.has(key) && !bySourceKey.has(key))
+    .map(([, f]) => f.title);
+
+  const identical = onlyInSource.length === 0 && onlyInTarget.length === 0 &&
+    hierarchyMismatch.length === 0 && matchedTitles.length > 0;
+
+  return { identical, matchedTitles, onlyInSource, onlyInTarget, hierarchyMismatch };
+}
+
 function findWorkspaceRoot() {
   const explicitRoot = (process.env.CYGNUS_WORKSPACE_ROOT ?? '').trim();
   if (explicitRoot) {
@@ -277,6 +322,88 @@ async function runDiscoverSlicers(pairName, pagesCsv, identity, side) {
   return JSON.parse(raw);
 }
 
+/**
+ * Discovers filters on BOTH reports and reports whether they match, so the
+ * renderer can offer one shared picker (match) or two separate ones (no
+ * match). Runs source first-match, then tries the SAME page name on target
+ * (falling back to target's own first-match scan if that page doesn't exist
+ * there - see DISCOVER_FALLBACK_FIRST_MATCH in discover-slicers.spec.ts).
+ * Both runs use CYGNUS_HIDE_WINDOW=1 so the browser window doesn't steal
+ * focus twice in a row.
+ */
+async function runCrossReportDiscovery(pairName, sourceIdentity, targetIdentity) {
+  const resolvedPairName = (pairName || 'Cygnus').trim();
+  const resultPath = path.join(WORKSPACE_ROOT, 'playwright-report-parity', resolvedPairName, 'discovered-slicers.json');
+
+  const readResult = (side) => {
+    if (!fs.existsSync(resultPath)) {
+      throw new Error(`Discovery finished but no results file was found at ${resultPath} for the ${side} side.`);
+    }
+    return JSON.parse(fs.readFileSync(resultPath, 'utf8'));
+  };
+
+  const writeIdentityOverride = (identity) => {
+    ensureRuntimeDir();
+    const payload = { pairName: resolvedPairName, source: identity, target: identity };
+    fs.writeFileSync(DISCOVER_RUNTIME_FILE, JSON.stringify(payload, null, 2), 'utf8');
+  };
+
+  emitLog('[desktop-runner] Starting cross-report filter discovery (source, then target)...');
+
+  // ── Source: first-match scan ──────────────────────────────────────────────
+  writeIdentityOverride(sourceIdentity);
+  emitLog(`[desktop-runner]   discovering SOURCE (tenant ${sourceIdentity.tenantId})...`);
+  await runScript('discover:slicers', {
+    CYGNUS_UI_RUNTIME_OVERRIDE: '1',
+    CYGNUS_UI_RUNTIME_CONFIG_PATH: DISCOVER_RUNTIME_FILE,
+    DISCOVER_SIDE: 'source',
+    DISCOVER_FIRST_MATCH: '1',
+    CYGNUS_HIDE_WINDOW: '1',
+  }, 'discover:slicers (source)');
+  const sourceResult = readResult('source'); // read BEFORE the target run overwrites this same file
+
+  const sourcePageName = Object.keys(sourceResult.pages || {})[0] ?? null;
+  const sourceFields = sourcePageName ? sourceResult.pages[sourcePageName] : [];
+
+  // ── Target: same page name if it exists, else target's own first-match ──
+  writeIdentityOverride(targetIdentity);
+  const targetExtraEnv = {
+    CYGNUS_UI_RUNTIME_OVERRIDE: '1',
+    CYGNUS_UI_RUNTIME_CONFIG_PATH: DISCOVER_RUNTIME_FILE,
+    DISCOVER_SIDE: 'target',
+    CYGNUS_HIDE_WINDOW: '1',
+  };
+  if (sourcePageName) {
+    targetExtraEnv.DISCOVER_PAGES = sourcePageName;
+    targetExtraEnv.DISCOVER_FALLBACK_FIRST_MATCH = '1';
+    emitLog(`[desktop-runner]   discovering TARGET, looking for page "${sourcePageName}" (falls back automatically if not found)...`);
+  } else {
+    targetExtraEnv.DISCOVER_FIRST_MATCH = '1';
+    emitLog('[desktop-runner]   SOURCE had no slicers found at all - discovering TARGET independently...');
+  }
+  await runScript('discover:slicers', targetExtraEnv, 'discover:slicers (target)');
+  const targetResult = readResult('target');
+
+  const targetPageName = Object.keys(targetResult.pages || {})[0] ?? null;
+  const targetFields = targetPageName ? targetResult.pages[targetPageName] : [];
+
+  const matchDetails = matchDiscoveredFieldsJs(sourceFields, targetFields);
+  emitLog(matchDetails.identical
+    ? '[desktop-runner]   filters match between source and target - one shared picker.'
+    : `[desktop-runner]   filters do NOT match between source and target (${matchDetails.onlyInSource.length} only in source, ${matchDetails.onlyInTarget.length} only in target, ${matchDetails.hierarchyMismatch.length} hierarchy mismatch) - separate pickers needed.`);
+
+  return {
+    identical: matchDetails.identical,
+    matchDetails,
+    sourcePage: sourcePageName,
+    targetPage: targetPageName,
+    sourceFields,
+    targetFields,
+    sourceAllPages: sourceResult.allPages || [],
+    targetAllPages: targetResult.allPages || [],
+  };
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1200,
@@ -312,6 +439,16 @@ ipcMain.handle('run-parity', async (_event, config) => {
     return { ok: true };
   } catch (e) {
     emitLog(`[desktop-runner] Parity error: ${e.message}`);
+    return { ok: false, error: e.message };
+  }
+});
+
+ipcMain.handle('run-discover-cross-report', async (_event, pairName, sourceIdentity, targetIdentity) => {
+  try {
+    const result = await runCrossReportDiscovery(pairName, sourceIdentity, targetIdentity);
+    return { ok: true, result };
+  } catch (e) {
+    emitLog(`[desktop-runner] Cross-report discover error: ${e.message}`);
     return { ok: false, error: e.message };
   }
 });

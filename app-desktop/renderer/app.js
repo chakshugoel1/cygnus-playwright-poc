@@ -147,6 +147,33 @@ function resolveDiscoverIdentity() {
   };
 }
 
+/** True when Source AND Target are both fully filled in - the trigger for
+ *  cross-report discovery instead of the single-side flow. */
+function bothIdentitiesFilled() {
+  const source = readIdentity('source');
+  const target = readIdentity('target');
+  return IDENTITY_REQUIRED_KEYS.every((k) => source[k]) && IDENTITY_REQUIRED_KEYS.every((k) => target[k]);
+}
+
+// Mirrors tests/helpers/report-export.helpers.ts's pageNameKey exactly (same
+// reasoning as main.js's copy: this is plain browser JS, no TypeScript
+// compilation step, so it can't import the .ts version directly).
+function pageNameKeyJs(name) {
+  return String(name || '').trim().toLowerCase().replace(/[\s_-]+/g, '');
+}
+
+function dedupePageNames(names) {
+  const seen = new Set();
+  const out = [];
+  for (const n of names) {
+    const key = pageNameKeyJs(n);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(n);
+  }
+  return out;
+}
+
 window.cygnusDesktop.onLog((line) => appendLog(line));
 window.cygnusDesktop.onState((state) => {
   statusEl.textContent = `State: ${state}`;
@@ -246,11 +273,11 @@ function groupDiscoveredFields(byPage) {
   return groups;
 }
 
-function getOrCreatePick(key, group) {
-  let pick = window._filterPicks.get(key);
+function getOrCreatePick(picksMap, key, group) {
+  let pick = picksMap.get(key);
   if (!pick) {
     pick = { ...group, value: '' };
-    window._filterPicks.set(key, pick);
+    picksMap.set(key, pick);
   } else {
     // Refresh discovery data (byPage/options/targets) on re-discovery, keep the user's picks.
     pick.isHierarchy = group.isHierarchy;
@@ -294,19 +321,35 @@ function buildScenarioFromPicks(pageScope) {
   // new playwright-report-parity/Cygnus/ui-<timestamp>/ folder every time.
   const scenario = { name: 'ui-filters', pages: {} };
   for (const pageName of pageScope) scenario.pages[pageName] = [];
+  if (pageScope.length === 0) return scenario;
 
-  for (const pick of window._filterPicks.values()) {
-    if (!pick.value || pageScope.length === 0) continue;
-    for (const pageName of pageScope) {
-      const sel = { title: pick.title, values: [pick.value], targets: pick.targets };
-      if (pick.isHierarchy) {
-        const onThisPage = pick.byPage[pageName];
-        if (!onThisPage) continue; // hierarchy can only be set where its visual exists
-        sel.isHierarchy = true;
-        sel.visualName = onThisPage.visualName;
+  const addPicksFromMap = (picksMap, side) => {
+    for (const pick of picksMap.values()) {
+      if (!pick.value) continue;
+      for (const pageName of pageScope) {
+        const sel = { title: pick.title, values: [pick.value], targets: pick.targets };
+        if (side) sel.side = side; // undefined = applies to both sides, as always
+        if (pick.isHierarchy) {
+          const onThisPage = pick.byPage[pageName];
+          if (!onThisPage) continue; // hierarchy can only be set where its visual exists
+          sel.isHierarchy = true;
+          sel.visualName = onThisPage.visualName;
+        }
+        scenario.pages[pageName].push(sel);
       }
-      scenario.pages[pageName].push(sel);
     }
+  };
+
+  if (window._discoverMode === 'split') {
+    // Cross-report discovery found the two reports' filters do NOT match -
+    // each side's picks were made against that side's own fields, so they
+    // must only ever apply on that side (see selectionsForSide in
+    // slicer-config.helpers.ts, which is what actually enforces this at
+    // apply time).
+    addPicksFromMap(window._filterPicksSource || new Map(), 'source');
+    addPicksFromMap(window._filterPicksTarget || new Map(), 'target');
+  } else {
+    addPicksFromMap(window._filterPicks, undefined);
   }
   return scenario;
 }
@@ -399,7 +442,7 @@ function renderGlobalFilters(globalFilters) {
   const el = document.getElementById('globalFiltersResult');
   el.innerHTML = '';
   if (!globalFilters || globalFilters.length === 0) {
-    el.innerHTML = '<div class="note">No report-level filters found — this report likely repeats fields as per-page slicers instead. Use page discovery below.</div>';
+    el.innerHTML = '<div class="note">No report-level filters found (or not checked in this discovery mode) — this report likely repeats fields as per-page slicers instead. Use page discovery below.</div>';
     return;
   }
   const pageDiv = document.createElement('div');
@@ -474,6 +517,7 @@ function renderFieldPicker(key, pick) {
 }
 
 function renderDiscoverResults(data) {
+  window._discoverMode = 'shared';
   const globalFilters = data.globalFilters || [];
   const byPage = data.pages || {};
   const allPages = Array.isArray(data.allPages) ? data.allPages : [];
@@ -500,13 +544,106 @@ function renderDiscoverResults(data) {
   container.appendChild(heading);
 
   for (const [key, group] of groups) {
-    const pick = getOrCreatePick(key, group);
+    const pick = getOrCreatePick(window._filterPicks, key, group);
     container.appendChild(renderFieldPicker(key, pick));
   }
 }
 
+/**
+ * Cross-report mode: source and target discovered DIFFERENT filters (or a
+ * flat-vs-hierarchy mismatch on a same-named field), so a single shared
+ * picker would be wrong - render two independent columns instead, with
+ * their own pick state, and tag each pick with which side it came from so
+ * buildScenarioFromPicks only applies it there.
+ */
+function renderSplitDiscoverResults(result) {
+  window._discoverMode = 'split';
+  if (!window._filterPicksSource) window._filterPicksSource = new Map();
+  if (!window._filterPicksTarget) window._filterPicksTarget = new Map();
+
+  const container = document.getElementById('discoverResults');
+  container.innerHTML = '';
+
+  const d = result.matchDetails || {};
+  const reasons = [];
+  if (d.onlyInSource && d.onlyInSource.length) reasons.push(`only in Source: ${d.onlyInSource.join(', ')}`);
+  if (d.onlyInTarget && d.onlyInTarget.length) reasons.push(`only in Target: ${d.onlyInTarget.join(', ')}`);
+  if (d.hierarchyMismatch && d.hierarchyMismatch.length) reasons.push(`type differs (flat vs hierarchy): ${d.hierarchyMismatch.join(', ')}`);
+
+  const banner = document.createElement('div');
+  banner.className = 'mismatch-banner';
+  banner.textContent = 'Filters are not identical between the two reports' +
+    (reasons.length ? ` (${reasons.join('; ')})` : ' (no common filters were found)') +
+    ' — select values separately for each report below.';
+  container.appendChild(banner);
+
+  const columns = document.createElement('div');
+  columns.className = 'split-columns';
+
+  const buildColumn = (label, pageName, fields, picksMap) => {
+    const col = document.createElement('div');
+    col.className = 'split-column';
+    const h = document.createElement('div');
+    h.className = 'section-title';
+    h.textContent = pageName ? `${label} filters (page: ${pageName})` : `${label} filters`;
+    col.appendChild(h);
+
+    const groups = groupDiscoveredFields(pageName ? { [pageName]: (fields || []) } : {});
+    if (groups.size === 0) {
+      const p = document.createElement('div');
+      p.className = 'note';
+      p.textContent = 'No slicers found.';
+      col.appendChild(p);
+      return col;
+    }
+    for (const [key, group] of groups) {
+      const pick = getOrCreatePick(picksMap, key, group);
+      col.appendChild(renderFieldPicker(key, pick));
+    }
+    return col;
+  };
+
+  columns.appendChild(buildColumn('Source', result.sourcePage, result.sourceFields, window._filterPicksSource));
+  columns.appendChild(buildColumn('Target', result.targetPage, result.targetFields, window._filterPicksTarget));
+  container.appendChild(columns);
+}
+
 document.getElementById('btnDiscover').addEventListener('click', async () => {
   const pairName = document.getElementById('pairName').value.trim() || 'Cygnus';
+
+  if (bothIdentitiesFilled()) {
+    const source = readIdentity('source');
+    const target = readIdentity('target');
+    appendLog('--- Discovering filters on BOTH reports (comparing source vs target) ---');
+    document.getElementById('globalFiltersResult').textContent = '';
+    document.getElementById('pageScopeResult').textContent = 'Loading page list…';
+    document.getElementById('discoverResults').textContent = 'Discovering source, then target… two fast first-match scans, one after the other.';
+
+    const res = await window.cygnusDesktop.discoverCrossReport(pairName, source, target);
+    if (!res.ok) {
+      document.getElementById('pageScopeResult').textContent = '';
+      document.getElementById('discoverResults').textContent = `Discovery failed: ${res.error}`;
+      return;
+    }
+
+    const result = res.result;
+    _discoveredPages = dedupePageNames([...(result.sourceAllPages || []), ...(result.targetAllPages || [])]);
+    renderPageScopeSelector(getPageUniverse());
+
+    if (result.identical) {
+      appendLog(`--- Filters match between reports (page "${result.sourcePage}") — one shared picker ---`);
+      renderDiscoverResults({
+        globalFilters: null,
+        pages: result.sourcePage ? { [result.sourcePage]: result.sourceFields } : {},
+        allPages: _discoveredPages,
+      });
+    } else {
+      appendLog('--- Filters do NOT match between reports — select values separately below ---');
+      renderSplitDiscoverResults(result);
+    }
+    return;
+  }
+
   const pagesCsv = getDiscoverPagesCsv();
   const pagesCsvInput = document.getElementById('pagesCsv').value.trim();
 

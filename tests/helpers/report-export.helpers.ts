@@ -95,11 +95,20 @@ export interface ReportExportResult {
   requestedPagesMissing: string[];
 }
 
-/** Trim + case-insensitive canonical form for page display names. Migrated
- *  reports drift in exactly these ways ("Vertragsversand " with a trailing
- *  space, "- Cluster" vs "- cluster") while still being the same page. */
+/**
+ * Canonical form for matching a page/filter display name across two reports.
+ * Migrated reports and cross-report filter titles drift in exactly these
+ * ways while still meaning the same thing: trailing/leading whitespace
+ * ("Vertragsversand " vs "Vertragsversand"), case ("- Cluster" vs
+ * "- cluster"), and separator style ("Recruiting_Weg" vs "Recruiting Weg"
+ * vs "RecruitingWeg" — separators are stripped entirely, not just
+ * normalized to one style, so "a_bc" and "abc" compare equal). Shared by
+ * page-name matching (this file) and cross-report filter-title matching
+ * (cross-report-match.helpers.ts) — one rule, used everywhere names from
+ * two different reports need to be compared.
+ */
 export function pageNameKey(name: string): string {
-  return name.trim().toLowerCase();
+  return name.trim().toLowerCase().replace(/[\s_-]+/g, '');
 }
 
 /**

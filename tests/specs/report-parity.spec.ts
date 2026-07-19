@@ -43,6 +43,7 @@ import { pollForUserToken, validateDatasetField } from '../helpers/pbi-api.helpe
 import {
   getScenarios,
   selectionsForPage,
+  selectionsForSide,
   scenarioSlug,
   planFilterApplication,
   globalFiltersEnabled,
@@ -308,10 +309,25 @@ test('Report Parity — Import mode vs Direct Lake data validation', async ({ pa
   // the summary rather than masquerade as a data difference.
   type FilterIssue = { page: string; error: string };
 
-  const makeHooks = (sc: ScenarioOrNone, filterIssues: FilterIssue[]) => {
+  const makeHooks = (sc: ScenarioOrNone, filterIssues: FilterIssue[], side: 'source' | 'target') => {
     if (sc === UNFILTERED) return { beforeExport: undefined, perPageHook: undefined };
 
-    const plan = useGlobalFilters ? planFilterApplication(sc) : null;
+    // A selection tagged `side: 'source'` or `side: 'target'` (set by the
+    // desktop app's cross-report filter matching when the two reports'
+    // filters turned out NOT to be identical - see selectionsForSide's
+    // doc comment) must never reach the OTHER side's export at all.
+    // Filtering it out of the scenario view here, before anything else
+    // touches `sc`, means planFilterApplication/selectionsForPage/etc
+    // below need zero awareness of `side` - they just never see a
+    // selection that doesn't belong to this side.
+    const sc_: SlicerScenario = {
+      name: sc.name,
+      pages: Object.fromEntries(
+        Object.entries(sc.pages).map(([pageName, sels]) => [pageName, selectionsForSide(sels, side)]),
+      ),
+    };
+
+    const plan = useGlobalFilters ? planFilterApplication(sc_) : null;
     if (plan && plan.global.length > 0) {
       console.log(`      (global-filter fast path: ${plan.global.length} field(s) will apply once instead of per-page)`);
     }
@@ -335,7 +351,7 @@ test('Report Parity — Import mode vs Direct Lake data validation', async ({ pa
         console.warn(`      ⚠ global filter batch failed — falling back to per-page for all ${plan.global.length} field(s): ${(e as Error).message}`);
         for (const g of plan.global) {
           for (const pageName of g.pages) {
-            const original = selectionsForPage(sc, pageName).find(
+            const original = selectionsForPage(sc_, pageName).find(
               s => s.targets && s.targets.length === 1 &&
                    s.targets[0].table === g.targets[0].table && s.targets[0].column === g.targets[0].column,
             );
@@ -355,7 +371,7 @@ test('Report Parity — Import mode vs Direct Lake data validation', async ({ pa
     };
 
     const applySelectionsForPage = async (p: import('@playwright/test').Page, pageDisplayName: string): Promise<void> => {
-      const selections = plan ? getForPageCI(plan.perPage, pageDisplayName) : selectionsForPage(sc, pageDisplayName);
+      const selections = plan ? getForPageCI(plan.perPage, pageDisplayName) : selectionsForPage(sc_, pageDisplayName);
       if (selections.length === 0) return; // "None" for this page
 
       // Visual-based selections (hierarchy, or explicit visualName) are each
@@ -415,7 +431,7 @@ test('Report Parity — Import mode vs Direct Lake data validation', async ({ pa
     if (runSource) {
       console.log(`\n[2] SOURCE (${SOURCE_LABEL}) → expected values ${P.label}`);
       applyReportIdentity(pair.source);
-      const srcHooks = makeHooks(sc, srcFilterIssues); // fresh plan — independent from target's
+      const srcHooks = makeHooks(sc, srcFilterIssues, 'source'); // fresh plan — independent from target's
       const srcPage = await context.newPage();
       try {
         srcResult = await exportReportToWorkbook(srcPage, token, {
@@ -438,7 +454,7 @@ test('Report Parity — Import mode vs Direct Lake data validation', async ({ pa
     if (runTarget) {
       console.log(`\n[3] TARGET (${TARGET_LABEL}) → actual values ${P.label}`);
       applyReportIdentity(pair.target);
-      const tgtHooks = makeHooks(sc, tgtFilterIssues); // fresh plan — independent from source's
+      const tgtHooks = makeHooks(sc, tgtFilterIssues, 'target'); // fresh plan — independent from source's
       const tgtPage = await context.newPage();
       try {
         tgtResult = await exportReportToWorkbook(tgtPage, token, {

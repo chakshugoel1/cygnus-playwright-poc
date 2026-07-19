@@ -271,6 +271,28 @@
     }
     .badge.hierarchy { background: var(--warn-bg); color: var(--warn-ink); }
 
+    /* ── Cross-report filter mismatch (split picker) ───────────────────── */
+    .mismatch-banner {
+      background: var(--warn-bg);
+      color: var(--warn-ink);
+      border: 1px solid var(--warn-ink);
+      border-radius: var(--radius-sm);
+      padding: var(--space-3);
+      font-size: 12px;
+      font-weight: 600;
+      margin-bottom: var(--space-3);
+    }
+    .split-columns {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: var(--space-4);
+      align-items: start;
+    }
+    .split-column > .section-title {
+      margin-bottom: var(--space-2);
+    }
+    .split-column .discover-page + .discover-page { margin-top: var(--space-2); }
+
     .placeholder {
       font-size: 12px;
       color: var(--faint);
@@ -281,6 +303,7 @@
       .grid { grid-template-columns: 1fr; }
       .row { grid-template-columns: 1fr; gap: var(--space-1); }
       label { white-space: normal; }
+      .split-columns { grid-template-columns: 1fr; }
     }
   </style>
 </head>

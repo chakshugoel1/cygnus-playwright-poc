@@ -54,6 +54,15 @@ export interface SlicerSelection {
    * (see planFilterApplication).
    */
   targets?: SlicerTarget[];
+  /**
+   * Set ONLY when cross-report filter discovery found this field is NOT
+   * identical between the source and target report (different title, or a
+   * flat-vs-hierarchy mismatch), and the user picked values separately for
+   * each side in the desktop app. Omitted (the default) means "apply to
+   * both sides identically", exactly as scenarios have always worked — see
+   * selectionsForSide below for how this is consumed.
+   */
+  side?: 'source' | 'target';
 }
 
 /** A slicer's binding target — matches harness.helpers.ts's SlicerTarget shape. */
@@ -254,6 +263,21 @@ export function getForPageCI<T>(record: Record<string, T[]>, pageDisplayName: st
 
 export function selectionsForPage(scenario: SlicerScenario, pageDisplayName: string): SlicerSelection[] {
   return getForPageCI(scenario.pages, pageDisplayName);
+}
+
+/**
+ * Filters a page's selections down to the ones that apply on the given side:
+ * anything with no `side` set (the default — applies to both), plus anything
+ * explicitly tagged for THIS side. A selection tagged for the OTHER side is
+ * dropped. Generic over any object with an optional `side` field so it works
+ * equally on SlicerSelection[] and on the un-narrowed union types that show
+ * up mid-pipeline in report-parity.spec.ts.
+ */
+export function selectionsForSide<T extends { side?: 'source' | 'target' }>(
+  selections: T[],
+  side: 'source' | 'target',
+): T[] {
+  return selections.filter(s => !s.side || s.side === side);
 }
 
 /** Filesystem-safe version of a scenario name, for output subfolders. */
