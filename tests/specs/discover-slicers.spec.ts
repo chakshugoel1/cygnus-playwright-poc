@@ -34,6 +34,21 @@
  *          THIS page, since its visual only exists here.
  *    DISCOVER_SIDE=target npm run discover:slicers
  *        → discover on the target (Direct Lake) report instead of source.
+ *    DISCOVER_PAGES="Dashboard Overview" DISCOVER_FALLBACK_FIRST_MATCH=1 npm run discover:slicers
+ *        → cross-report mode (used by the desktop app's cross-report filter
+ *          matching, not typically set by hand): try the exact named page
+ *          (case/whitespace/separator-insensitive), and if THIS report
+ *          doesn't have a page by that name, silently fall back to a
+ *          first-match scan instead of throwing "Page(s) not found". Only
+ *          meaningful with exactly one page named.
+ *    DISCOVER_SKIP_GLOBAL_CHECK=1 npm run discover:slicers
+ *        → skip the global (report-level) filter check entirely. Still on
+ *          by default (it's cheap and useful for reports that DO use
+ *          report-level filters) — this is for when you already know YOUR
+ *          report always comes back empty there and don't want to see it
+ *          in the output every time. The desktop app sets this by default
+ *          for its own discovery calls; the raw CLI command above still
+ *          checks unless you set it yourself.
  *
  * Output:
  *    - Printed to console: global filters first, then each crawled page
@@ -57,7 +72,7 @@
  * during testing (visibility could not be trusted for that either).
  */
 
-import { test } from '@playwright/test';
+import { test, type Page } from '@playwright/test';
 import * as fs   from 'fs';
 import * as path from 'path';
 
@@ -67,6 +82,7 @@ import {
   type DiscoveredSlicer, type ReportPage, type GlobalFilterInfo,
 } from '../helpers/harness.helpers';
 import { pollForUserToken } from '../helpers/pbi-api.helpers';
+import { pageNameKey } from '../helpers/report-export.helpers';
 
 const PAIR = getActivePair();
 const SIDE = ((process.env['DISCOVER_SIDE'] ?? 'source').trim().toLowerCase() === 'target') ? 'target' : 'source';
@@ -76,7 +92,9 @@ const PAGES_CSV = (process.env['DISCOVER_PAGES'] ?? process.env['DISCOVER_PAGE']
 const NAMED_PAGES = PAGES_CSV ? PAGES_CSV.split(',').map(s => s.trim()).filter(Boolean) : [];
 const CRAWL_ALL = (process.env['DISCOVER_ALL_PAGES'] ?? '').trim() === '1';
 const FIRST_MATCH = (process.env['DISCOVER_FIRST_MATCH'] ?? '').trim() === '1';
+const FALLBACK_FIRST_MATCH = (process.env['DISCOVER_FALLBACK_FIRST_MATCH'] ?? '').trim() === '1';
 const INCLUDE_HIDDEN = (process.env['DISCOVER_INCLUDE_HIDDEN'] ?? '').trim() === '1';
+const SKIP_GLOBAL_CHECK = (process.env['DISCOVER_SKIP_GLOBAL_CHECK'] ?? '').trim() === '1';
 
 const OUT_DIR  = path.join(process.cwd(), 'playwright-report-parity', PAIR.name);
 const OUT_JSON = path.join(OUT_DIR, 'discovered-slicers.json');
@@ -112,6 +130,40 @@ function logPageSlicers(slicers: DiscoveredSlicer[]): void {
   }
 }
 
+/**
+ * Walks pages in declared order, skipping likely tooltip pages, and stops at
+ * the first one that actually has slicers — see the module comment for why
+ * one representative page is usually enough. Shared by DISCOVER_FIRST_MATCH
+ * and the DISCOVER_FALLBACK_FIRST_MATCH cross-report mode below. Mutates
+ * `pagesResult` in place; returns whether it found anything.
+ */
+async function scanForFirstPageWithSlicers(
+  page: Page,
+  allPages: ReportPage[],
+  pagesResult: Record<string, DiscoveredSlicer[]>,
+): Promise<boolean> {
+  console.log('\n[4] Scanning for the first page with slicers...');
+  const candidates = allPages.filter(p => !looksLikeTooltipPage(p.displayName));
+  for (const p of candidates) {
+    console.log(`\n[4]   checking "${p.displayName}"...`);
+    await setReportPage(page, p.name);
+    await page.waitForTimeout(3_000);
+
+    const slicers = await discoverPageSlicers(page);
+    if (slicers.length === 0) {
+      console.log('      (no slicers here, trying next page)');
+      continue;
+    }
+
+    pagesResult[p.displayName] = slicers;
+    console.log(`      found ${slicers.length} slicer(s) — stopping scan.`);
+    logPageSlicers(slicers);
+    return true;
+  }
+  console.log('\n    No page with slicers was found while scanning.');
+  return false;
+}
+
 /** Returns [] when neither named pages nor bulk mode was requested — global check only. */
 function resolveTargetPages(allPages: ReportPage[]): ReportPage[] {
   if (NAMED_PAGES.length > 0) {
@@ -120,7 +172,7 @@ function resolveTargetPages(allPages: ReportPage[]): ReportPage[] {
     const found: ReportPage[] = [];
     const missing: string[] = [];
     for (const wanted of NAMED_PAGES) {
-      const matches = allPages.filter(p => p.displayName.toLowerCase() === wanted.toLowerCase());
+      const matches = allPages.filter(p => p.displayName.trim().toLowerCase() === wanted.trim().toLowerCase());
       if (matches.length === 0) {
         missing.push(wanted);
       } else {
@@ -180,71 +232,70 @@ test('Discover Slicers', async ({ page }) => {
   await loadHarnessPage(page, token);
 
   // ── Step 1: global check — always, fast, no page navigation ──────────────
-  console.log('\n[3] Checking for report-level ("global") filters...');
-  let globalFilters: GlobalFilterInfo[] = [];
-  try {
-    globalFilters = await getGlobalFilters(page);
-  } catch (e) {
-    console.warn(`      ⚠ could not read global filters: ${(e as Error).message}`);
-  }
-  if (globalFilters.length === 0) {
-    console.log('      (none found — this report likely repeats fields as per-page slicers instead; see [4] below)');
+  let globalFilters: GlobalFilterInfo[] | null = [];
+  if (SKIP_GLOBAL_CHECK) {
+    console.log('\n[3] Skipping report-level ("global") filter check (DISCOVER_SKIP_GLOBAL_CHECK=1).');
+    globalFilters = null;
   } else {
-    for (const f of globalFilters) {
-      const t = f.target as any;
-      const label = t?.table && t?.column ? `${t.table}.${t.column}` : JSON.stringify(t);
-      console.log(`      • ${label} → [${(f.values ?? ['(hierarchy selection)']).join(', ')}]`);
+    console.log('\n[3] Checking for report-level ("global") filters...');
+    try {
+      globalFilters = await getGlobalFilters(page);
+    } catch (e) {
+      console.warn(`      ⚠ could not read global filters: ${(e as Error).message}`);
+    }
+    if (globalFilters.length === 0) {
+      console.log('      (none found — this report likely repeats fields as per-page slicers instead; see [4] below)');
+    } else {
+      for (const f of globalFilters) {
+        const t = f.target as any;
+        const label = t?.table && t?.column ? `${t.table}.${t.column}` : JSON.stringify(t);
+        console.log(`      • ${label} → [${(f.values ?? ['(hierarchy selection)']).join(', ')}]`);
+      }
     }
   }
 
   // ── Step 2: page crawl — only for pages actually requested ────────────────
   const allPages = await getReportPages(page);
-  const targetPages = resolveTargetPages(allPages);
-
   const pagesResult: Record<string, DiscoveredSlicer[]> = {};
 
-  if (targetPages.length > 0) {
-    for (const p of targetPages) {
-      console.log(`\n[4] Page "${p.displayName}"`);
-      await setReportPage(page, p.name);
-      await page.waitForTimeout(3_000); // let the page settle before reading visuals
-
-      const slicers = await discoverPageSlicers(page);
-      pagesResult[p.displayName] = slicers;
-      logPageSlicers(slicers);
-    }
-  } else if (FIRST_MATCH) {
-    // No specific pages requested, but the caller wants something useful
-    // without paying for a full-report crawl (DISCOVER_ALL_PAGES). Walk
-    // pages in declared order, skipping likely tooltip pages, and stop at
-    // the first one that actually has slicers — see the module comment for
-    // why one representative page is usually enough.
-    console.log('\n[4] No pages specified — scanning for the first page with slicers...');
-    const candidates = allPages.filter(p => !looksLikeTooltipPage(p.displayName));
-    let matched = false;
-    for (const p of candidates) {
-      console.log(`\n[4]   checking "${p.displayName}"...`);
-      await setReportPage(page, p.name);
+  if (NAMED_PAGES.length === 1 && FALLBACK_FIRST_MATCH) {
+    // Cross-report mode: never calls resolveTargetPages (and so never hits
+    // its throw-on-missing behavior) — a missing page here is an expected,
+    // handled case, not an error.
+    const wanted = NAMED_PAGES[0];
+    const match = allPages.find(p => pageNameKey(p.displayName) === pageNameKey(wanted));
+    if (match) {
+      console.log(`\n[4] Found matching page "${match.displayName}" for "${wanted}" — crawling it...`);
+      await setReportPage(page, match.name);
       await page.waitForTimeout(3_000);
-
       const slicers = await discoverPageSlicers(page);
-      if (slicers.length === 0) {
-        console.log('      (no slicers here, trying next page)');
-        continue;
-      }
-
-      pagesResult[p.displayName] = slicers;
-      console.log(`      found ${slicers.length} slicer(s) — stopping scan.`);
+      pagesResult[match.displayName] = slicers;
       logPageSlicers(slicers);
-      matched = true;
-      break;
-    }
-    if (!matched) {
-      console.log('\n    No page with slicers was found while scanning.');
+    } else {
+      console.log(`\n[4] Page "${wanted}" not found on this report — falling back to a first-match scan...`);
+      await scanForFirstPageWithSlicers(page, allPages, pagesResult);
     }
   } else {
-    console.log('\n[4] No pages requested — skipping page crawl.');
-    console.log('    Set DISCOVER_PAGES="PageA,PageB" to crawl specific pages, DISCOVER_FIRST_MATCH=1 for one representative page, or DISCOVER_ALL_PAGES=1 for every page.');
+    const targetPages = resolveTargetPages(allPages);
+
+    if (targetPages.length > 0) {
+      for (const p of targetPages) {
+        console.log(`\n[4] Page "${p.displayName}"`);
+        await setReportPage(page, p.name);
+        await page.waitForTimeout(3_000); // let the page settle before reading visuals
+
+        const slicers = await discoverPageSlicers(page);
+        pagesResult[p.displayName] = slicers;
+        logPageSlicers(slicers);
+      }
+    } else if (FIRST_MATCH) {
+      // No specific pages requested, but the caller wants something useful
+      // without paying for a full-report crawl (DISCOVER_ALL_PAGES).
+      await scanForFirstPageWithSlicers(page, allPages, pagesResult);
+    } else {
+      console.log('\n[4] No pages requested — skipping page crawl.');
+      console.log('    Set DISCOVER_PAGES="PageA,PageB" to crawl specific pages, DISCOVER_FIRST_MATCH=1 for one representative page, or DISCOVER_ALL_PAGES=1 for every page.');
+    }
   }
 
   const allPageNames = allPages.map(p => p.displayName);

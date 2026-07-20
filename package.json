@@ -32,6 +32,7 @@
   },
   "dependencies": {
     "dotenv": "^17.4.2",
-    "exceljs": "^4.4.0"
+    "exceljs": "^4.4.0",
+    "unzipper": "^0.10.14"
   }
 }

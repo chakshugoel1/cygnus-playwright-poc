@@ -33,11 +33,21 @@ export default defineConfig({
     // constant CPU/disk cost on every run, pass or fail. Keep it only when a
     // test actually fails, which is the only time the video is useful anyway.
     video: 'retain-on-failure',
+    // Deliberately NOT headless: Power BI's embed SDK is known to defer/pause
+    // rendering when it thinks the page isn't genuinely visible, which risks
+    // window.__rendered never firing (a hang, not just "invisible") - a real
+    // regression, not a cosmetic one, and not worth gambling on without
+    // testing it directly against this tenant. CYGNUS_HIDE_WINDOW=1 gets the
+    // same "don't distract the user" outcome a safer way: keep the exact
+    // same headed rendering pipeline, just move the window off-screen. Used
+    // by the desktop app's cross-report filter discovery (which embeds two
+    // reports back to back) - unset for every other flow, so nothing about
+    // report-parity's normal run or a manual `discover:slicers` changes.
     headless: false,
     launchOptions: {
       slowMo: 0,
       args: [
-        '--window-position=0,0',
+        process.env['CYGNUS_HIDE_WINDOW'] === '1' ? '--window-position=-3000,-3000' : '--window-position=0,0',
         '--window-size=1920,1080',
         '--force-device-scale-factor=1',  // bypass Windows DPI scaling
       ],

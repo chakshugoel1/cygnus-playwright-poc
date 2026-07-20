@@ -49,6 +49,133 @@ import * as crypto from 'crypto';
 import * as path   from 'path';
 import ExcelJS     from 'exceljs';
 
+// Central-directory zip access (Open.file reads only the zip's directory, then
+// inflates single entries on demand — no whole-file buffering). Already a
+// transitive dependency of exceljs; declared as a direct dependency in
+// package.json so an exceljs upgrade can never silently remove it.
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const unzipper = require('unzipper');
+
+// ── Deterministic sheet-name resolution ──────────────────────────────────────
+//
+// ExcelJS's streaming READER resolves a worksheet's display name by looking it
+// up in workbook.xml — but only if workbook.xml happened to appear EARLIER in
+// the zip than the worksheet entry. Files produced by ExcelJS's streaming
+// WRITER (i.e. our own exports) put the worksheets FIRST and workbook.xml
+// last, and the relative order of workbook.xml vs its .rels file is not even
+// deterministic across runs. Depending on that order the reader either:
+//   - crashes ("Cannot read properties of undefined (reading 'sheets')" in
+//     _parseWorksheet — rels parsed, workbook.xml not yet), or
+//   - silently falls back to default names ("Sheet1", "Sheet2", ...), which
+//     then destroys sheet pairing between the two workbooks being compared.
+// Both were observed in production on a machine validating two real reports.
+//
+// Fix: read the sheet list ourselves, directly from workbook.xml (+ its rels
+// for the sheetN.xml file mapping) via the zip central directory — fully
+// order-independent — and PRE-SEED the ExcelJS reader's internal model before
+// iterating, so its lookup always succeeds and its crash branch is
+// unreachable. Belt-and-braces: sheet matching below also accepts the
+// file-number id, and a sheet that is never emitted at all now throws instead
+// of silently producing an empty result.
+
+/** One sheet as resolved from workbook.xml: display name + sheetN.xml number. */
+export interface SheetInfo {
+  name:    string;  // real display name (page name), exactly as written
+  fileNo:  string;  // N in xl/worksheets/sheetN.xml
+  rId:     string;  // relationship id linking workbook.xml to the file
+  sheetId: string;  // workbook.xml sheetId attribute
+}
+
+function decodeXmlEntities(text: string): string {
+  return text
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, h) => String.fromCodePoint(parseInt(h, 16)))
+    .replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(parseInt(d, 10)))
+    .replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+}
+
+/** Reads the ordered sheet list from an xlsx via its central directory. */
+export async function readWorkbookSheetInfo(filePath: string): Promise<SheetInfo[]> {
+  const dir = await unzipper.Open.file(filePath);
+  const entryFor = (p: string) => dir.files.find((f: any) => f.path === p);
+
+  const wbEntry = entryFor('xl/workbook.xml');
+  if (!wbEntry) throw new Error(`Not a valid xlsx (no xl/workbook.xml): ${filePath}`);
+  const wbXml = (await wbEntry.buffer()).toString('utf8');
+
+  // rId → sheet file number, from the workbook rels (may be absent in odd files)
+  const relTargets = new Map<string, string>();
+  const relsEntry = entryFor('xl/_rels/workbook.xml.rels');
+  if (relsEntry) {
+    const relsXml = (await relsEntry.buffer()).toString('utf8');
+    for (const rel of relsXml.match(/<Relationship\b[^>]*>/g) ?? []) {
+      const id     = rel.match(/\bId="([^"]+)"/)?.[1];
+      const target = rel.match(/\bTarget="[^"]*worksheets\/sheet(\d+)\.xml"/)?.[1];
+      if (id && target) relTargets.set(id, target);
+    }
+  }
+
+  const sheets: SheetInfo[] = [];
+  for (const tag of wbXml.match(/<sheet\b[^>]*>/g) ?? []) {
+    const name    = tag.match(/\bname="([^"]*)"/)?.[1];
+    const rId     = tag.match(/\br:id="([^"]+)"/)?.[1] ?? '';
+    const sheetId = tag.match(/\bsheetId="([^"]+)"/)?.[1] ?? '';
+    if (name === undefined) continue;
+    // Fall back to declaration order when rels are missing — matches how the
+    // ExcelJS writer numbers its sheet files.
+    const fileNo = (rId && relTargets.get(rId)) || String(sheets.length + 1);
+    sheets.push({ name: decodeXmlEntities(name), fileNo, rId, sheetId });
+  }
+  if (sheets.length === 0) throw new Error(`No sheets declared in workbook.xml: ${filePath}`);
+  return sheets;
+}
+
+/**
+ * Creates an ExcelJS streaming reader with its internal workbook model
+ * PRE-SEEDED from our own central-directory parse, so _parseWorksheet's
+ * name lookup always succeeds regardless of zip entry order (see the long
+ * comment above). Touches two internal fields of the pinned exceljs 4.4.0
+ * reader (model, workbookRels); the ws.id fallback in isTargetSheet keeps
+ * working even if a future exceljs version ignores the seeding.
+ */
+function makeSeededReader(filePath: string, sheets: SheetInfo[]): any {
+  const reader = new (ExcelJS as any).stream.xlsx.WorkbookReader(filePath, {
+    sharedStrings: 'cache',
+    hyperlinks:    'ignore',
+    styles:        'ignore',
+    entries:       'emit',
+  });
+  reader.model = {
+    sheets: sheets.map((s, i) => ({
+      id: Number(s.sheetId) || i + 1,
+      name: s.name,
+      rId: s.rId || `rId${s.fileNo}`,
+    })),
+  };
+  reader.workbookRels = sheets.map(s => ({
+    Id:     s.rId || `rId${s.fileNo}`,
+    Target: `worksheets/sheet${s.fileNo}.xml`,
+  }));
+  return reader;
+}
+
+/** True when the emitted worksheet is the one described by `target`. */
+function isTargetSheet(ws: any, target: SheetInfo, realNames: Set<string>): boolean {
+  const wsName = typeof ws.name === 'string' ? ws.name : '';
+  // A name we recognise from workbook.xml is authoritative; otherwise the
+  // reader fell back to its default ("Sheet<fileNo>") and the id — which in
+  // that fallback IS the file number — identifies the sheet instead.
+  if (realNames.has(wsName)) return wsName === target.name;
+  return String(ws.id) === String(target.fileNo);
+}
+
+/** Canonical pairing key: sheet names differing only by case/edge-whitespace
+ *  (e.g. "…- Cluster" vs "…- cluster" between a source and a migrated report)
+ *  refer to the same page and must pair up. */
+function sheetKey(name: string): string {
+  return name.trim().toLowerCase();
+}
+
 // ── Public types ─────────────────────────────────────────────────────────────
 
 export type VisualDiffStatus =
@@ -224,48 +351,54 @@ interface SheetHashResult {
   rowCount:    number;
 }
 
-async function hashSheetOrdered(filePath: string, sheetName: string): Promise<SheetHashResult> {
-  let orderedHash = '';
-  let rowCount    = 0;
-
-  const reader = new (ExcelJS as any).stream.xlsx.WorkbookReader(filePath, {
-    sharedStrings: 'cache',
-    hyperlinks:    'ignore',
-    styles:        'ignore',
-    entries:       'emit',
-  });
-
-  for await (const ws of reader) {
-    if (ws.name !== sheetName) {
-      for await (const _ of ws) { /* drain so the stream doesn't stall */ }
-      continue;
-    }
-    for await (const row of ws) {
-      const cells = normalizeRow(row as ExcelJS.Row);
-      if (cells.every(c => c === '')) continue; // skip fully-blank spacer rows
-      rowCount++;
-      orderedHash = hashRunning(orderedHash, hashRow(cells));
-    }
+/**
+ * One retry for a failed streaming read. The failure mode this covers was
+ * observed in production: the ExcelJS reader ending its iteration early
+ * without emitting every sheet. A sheet not being emitted now THROWS (see the
+ * `found` checks in the readers below) instead of silently returning an empty
+ * result that would then be "compared" as if it were real data.
+ */
+async function withSheetRetry<T>(filePath: string, target: SheetInfo, read: () => Promise<T>): Promise<T> {
+  try {
+    return await read();
+  } catch (e) {
+    console.warn(`[excel-compare] Re-reading "${target.name}" from ${path.basename(filePath)} after a failed streaming read: ${(e as Error).message}`);
+    return await read();
   }
-
-  return { orderedHash, rowCount };
 }
 
-// ── Sheet-name discovery (streaming, cheap) ───────────────────────────────────
+function sheetNotEmitted(filePath: string, target: SheetInfo): Error {
+  return new Error(
+    `Sheet "${target.name}" (worksheets/sheet${target.fileNo}.xml) exists in ${path.basename(filePath)}'s ` +
+    `workbook.xml but was never emitted by the streaming reader — the file may be corrupted or the read ` +
+    `was interrupted. Refusing to treat it as empty.`,
+  );
+}
 
-async function getSheetNames(filePath: string): Promise<string[]> {
-  const names: string[] = [];
-  const reader = new (ExcelJS as any).stream.xlsx.WorkbookReader(filePath, {
-    sharedStrings: 'cache',
-    hyperlinks:    'ignore',
-    styles:        'ignore',
-    entries:       'emit',
+async function hashSheetOrdered(filePath: string, target: SheetInfo, allSheets: SheetInfo[]): Promise<SheetHashResult> {
+  const realNames = new Set(allSheets.map(s => s.name));
+  return withSheetRetry(filePath, target, async () => {
+    let orderedHash = '';
+    let rowCount    = 0;
+    let found       = false;
+
+    const reader = makeSeededReader(filePath, allSheets);
+    for await (const ws of reader) {
+      if (!isTargetSheet(ws, target, realNames)) {
+        for await (const _ of ws) { /* drain so the stream doesn't stall */ }
+        continue;
+      }
+      found = true;
+      for await (const row of ws) {
+        const cells = normalizeRow(row as ExcelJS.Row);
+        if (cells.every(c => c === '')) continue; // skip fully-blank spacer rows
+        rowCount++;
+        orderedHash = hashRunning(orderedHash, hashRow(cells));
+      }
+    }
+    if (!found) throw sheetNotEmitted(filePath, target);
+    return { orderedHash, rowCount };
   });
-  for await (const ws of reader) {
-    names.push(ws.name);
-    for await (const _ of ws) { /* drain */ }
-  }
-  return names;
 }
 
 // ── Tier 2: visual-block parsing ──────────────────────────────────────────────
@@ -288,47 +421,47 @@ interface VisualBlockRaw {
   rows:    string[][];
 }
 
-async function streamSheetBlocks(filePath: string, sheetName: string): Promise<VisualBlockRaw[]> {
-  const blocks: VisualBlockRaw[] = [];
-  let current: VisualBlockRaw | null = null;
-  let sawHeaderForCurrent = false;
+async function streamSheetBlocks(filePath: string, target: SheetInfo, allSheets: SheetInfo[]): Promise<VisualBlockRaw[]> {
+  const realNames = new Set(allSheets.map(s => s.name));
+  return withSheetRetry(filePath, target, async () => {
+    const blocks: VisualBlockRaw[] = [];
+    let current: VisualBlockRaw | null = null;
+    let sawHeaderForCurrent = false;
+    let found = false;
 
-  const reader = new (ExcelJS as any).stream.xlsx.WorkbookReader(filePath, {
-    sharedStrings: 'cache',
-    hyperlinks:    'ignore',
-    styles:        'ignore',
-    entries:       'emit',
-  });
-
-  for await (const ws of reader) {
-    if (ws.name !== sheetName) {
-      for await (const _ of ws) { /* drain */ }
-      continue;
-    }
-    for await (const row of ws) {
-      const cells = normalizeRow(row as ExcelJS.Row);
-      const isBlank = cells.every(c => c === '');
-      const marker  = !isBlank ? cells[0].match(VISUAL_MARKER_RE) : null;
-
-      if (marker) {
-        if (current) blocks.push(current);
-        current = { title: marker[1].trim(), type: marker[2].trim(), headers: [], rows: [] };
-        sawHeaderForCurrent = false;
+    const reader = makeSeededReader(filePath, allSheets);
+    for await (const ws of reader) {
+      if (!isTargetSheet(ws, target, realNames)) {
+        for await (const _ of ws) { /* drain */ }
         continue;
       }
-      if (isBlank) continue;       // spacer row between visuals
-      if (!current) continue;      // defensive: content before any marker row
+      found = true;
+      for await (const row of ws) {
+        const cells = normalizeRow(row as ExcelJS.Row);
+        const isBlank = cells.every(c => c === '');
+        const marker  = !isBlank ? cells[0].match(VISUAL_MARKER_RE) : null;
 
-      if (!sawHeaderForCurrent) {
-        current.headers = cells;
-        sawHeaderForCurrent = true;
-      } else {
-        current.rows.push(cells);
+        if (marker) {
+          if (current) blocks.push(current);
+          current = { title: marker[1].trim(), type: marker[2].trim(), headers: [], rows: [] };
+          sawHeaderForCurrent = false;
+          continue;
+        }
+        if (isBlank) continue;       // spacer row between visuals
+        if (!current) continue;      // defensive: content before any marker row
+
+        if (!sawHeaderForCurrent) {
+          current.headers = cells;
+          sawHeaderForCurrent = true;
+        } else {
+          current.rows.push(cells);
+        }
       }
     }
-  }
-  if (current) blocks.push(current);
-  return blocks;
+    if (!found) throw sheetNotEmitted(filePath, target);
+    if (current) blocks.push(current);
+    return blocks;
+  });
 }
 
 // ── Tier 2: block matching + comparison ───────────────────────────────────────
@@ -593,34 +726,37 @@ function matchVisualBlocks(expectedBlocks: VisualBlockRaw[], actualBlocks: Visua
 // non-Cygnus-format sheet still gets a real comparison instead of a vacuous
 // "nothing parsed, so call it identical".
 
-async function streamPlainRows(filePath: string, sheetName: string): Promise<string[][]> {
-  const rows: string[][] = [];
-  const reader = new (ExcelJS as any).stream.xlsx.WorkbookReader(filePath, {
-    sharedStrings: 'cache',
-    hyperlinks:    'ignore',
-    styles:        'ignore',
-    entries:       'emit',
+async function streamPlainRows(filePath: string, target: SheetInfo, allSheets: SheetInfo[]): Promise<string[][]> {
+  const realNames = new Set(allSheets.map(s => s.name));
+  return withSheetRetry(filePath, target, async () => {
+    const rows: string[][] = [];
+    let found = false;
+    const reader = makeSeededReader(filePath, allSheets);
+    for await (const ws of reader) {
+      if (!isTargetSheet(ws, target, realNames)) {
+        for await (const _ of ws) { /* drain */ }
+        continue;
+      }
+      found = true;
+      for await (const row of ws) {
+        const cells = normalizeRow(row as ExcelJS.Row);
+        if (cells.every(c => c === '')) continue;
+        rows.push(cells);
+      }
+    }
+    if (!found) throw sheetNotEmitted(filePath, target);
+    return rows;
   });
-  for await (const ws of reader) {
-    if (ws.name !== sheetName) {
-      for await (const _ of ws) { /* drain */ }
-      continue;
-    }
-    for await (const row of ws) {
-      const cells = normalizeRow(row as ExcelJS.Row);
-      if (cells.every(c => c === '')) continue;
-      rows.push(cells);
-    }
-  }
-  return rows;
 }
 
 async function comparePlainSheet(
-  fileExpected: string, fileActual: string, sheetName: string,
+  fileExpected: string, fileActual: string,
+  expSheet: SheetInfo, actSheet: SheetInfo,
+  expAll: SheetInfo[], actAll: SheetInfo[],
 ): Promise<VisualBlockDiff[]> {
   const [rowsExp, rowsAct] = await Promise.all([
-    streamPlainRows(fileExpected, sheetName),
-    streamPlainRows(fileActual,   sheetName),
+    streamPlainRows(fileExpected, expSheet, expAll),
+    streamPlainRows(fileActual,   actSheet, actAll),
   ]);
 
   const expSig = blockDataSignature(rowsExp);
@@ -663,15 +799,24 @@ export async function compareWorkbooks(
   fileExpected: string,
   fileActual:   string,
 ): Promise<WorkbookDiffSummary> {
-  const sheetsExpected = await getSheetNames(fileExpected);
-  const sheetsActual   = await getSheetNames(fileActual);
+  // Sheet lists come from each file's workbook.xml via the central directory —
+  // deterministic and complete, never dependent on zip entry order (see the
+  // module comment on readWorkbookSheetInfo).
+  const expSheets = await readWorkbookSheetInfo(fileExpected);
+  const actSheets = await readWorkbookSheetInfo(fileActual);
 
-  const setExpected = new Set(sheetsExpected);
-  const setActual   = new Set(sheetsActual);
+  // Pair case-insensitively and whitespace-trimmed: "…- Cluster" vs
+  // "…- cluster" (or a trailing space) between a source and a migrated
+  // report is the same page, not a missing sheet. Excel forbids two sheets
+  // in ONE workbook differing only by case, so keys are unique per side.
+  const actByKey = new Map(actSheets.map(s => [sheetKey(s.name), s]));
+  const expKeys  = new Set(expSheets.map(s => sheetKey(s.name)));
 
-  const sheetsOnlyInExpected = sheetsExpected.filter(s => !setActual.has(s));
-  const sheetsOnlyInActual   = sheetsActual.filter(s => !setExpected.has(s));
-  const commonSheets         = sheetsExpected.filter(s => setActual.has(s));
+  const sheetsOnlyInExpected = expSheets.filter(s => !actByKey.has(sheetKey(s.name))).map(s => s.name);
+  const sheetsOnlyInActual   = actSheets.filter(s => !expKeys.has(sheetKey(s.name))).map(s => s.name);
+  const commonPairs = expSheets
+    .filter(s => actByKey.has(sheetKey(s.name)))
+    .map(s => ({ exp: s, act: actByKey.get(sheetKey(s.name))! }));
 
   const sheetResults: SheetDiffSummary[] = [];
 
@@ -687,11 +832,13 @@ export async function compareWorkbooks(
   for (const s of sheetsOnlyInExpected) sheetResults.push(emptySheetResult(s, true, false));
   for (const s of sheetsOnlyInActual)   sheetResults.push(emptySheetResult(s, false, true));
 
-  // Common sheets — Tier 1 then Tier 2
-  for (const sheetName of commonSheets) {
+  // Common sheets — Tier 1 then Tier 2. Reported under the EXPECTED side's
+  // name when the two sides' names differ only by case/whitespace.
+  for (const { exp, act } of commonPairs) {
+    const sheetName = exp.name;
     const [expHash, actHash] = await Promise.all([
-      hashSheetOrdered(fileExpected, sheetName),
-      hashSheetOrdered(fileActual,   sheetName),
+      hashSheetOrdered(fileExpected, exp, expSheets),
+      hashSheetOrdered(fileActual,   act, actSheets),
     ]);
 
     if (expHash.orderedHash === actHash.orderedHash) {
@@ -709,8 +856,8 @@ export async function compareWorkbooks(
 
     // Tier 2: visual-block-aware detailed comparison.
     const [expBlocks, actBlocks] = await Promise.all([
-      streamSheetBlocks(fileExpected, sheetName),
-      streamSheetBlocks(fileActual,   sheetName),
+      streamSheetBlocks(fileExpected, exp, expSheets),
+      streamSheetBlocks(fileActual,   act, actSheets),
     ]);
 
     let visuals: VisualBlockDiff[];
@@ -722,7 +869,7 @@ export async function compareWorkbooks(
       // way execution reaches here), so falling through to an empty visuals
       // list would be a vacuous truth — "nothing to compare" is not the same
       // as "everything matches". Compare the raw rows directly instead.
-      visuals = await comparePlainSheet(fileExpected, fileActual, sheetName);
+      visuals = await comparePlainSheet(fileExpected, fileActual, exp, act, expSheets, actSheets);
     } else {
       visuals = matchVisualBlocks(expBlocks, actBlocks);
     }

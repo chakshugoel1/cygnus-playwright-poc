@@ -51,6 +51,20 @@ interface ServicePrincipal {
   clientSecret: string;
 }
 
+/**
+ * True when a credential field still holds unfilled boilerplate — the
+ * "<from IT>" text from pbi-service-principal.template.json, a REPLACE_WITH_
+ * marker, or nothing at all. Without this check, a template file that was
+ * copied but never filled in gets used verbatim: the token request is made
+ * with the literal text "<from IT>" as the client id and fails with a
+ * confusing HTTP error on EVERY report embed, instead of one clean
+ * "not configured, using fallback" message.
+ */
+export function looksLikePlaceholder(value: string | undefined | null): boolean {
+  if (!value || !value.trim()) return true;
+  return /<from IT>|REPLACE_WITH/i.test(value);
+}
+
 function loadServicePrincipal(): ServicePrincipal {
   if (!fs.existsSync(SP_FILE)) {
     throw new Error(
@@ -61,8 +75,11 @@ function loadServicePrincipal(): ServicePrincipal {
   }
   const raw = fs.readFileSync(SP_FILE, 'utf-8');
   const sp  = JSON.parse(raw) as ServicePrincipal;
-  if (!sp.clientId || !sp.clientSecret) {
-    throw new Error(`${SP_FILE} is missing clientId or clientSecret.`);
+  if (looksLikePlaceholder(sp.tenantId) || looksLikePlaceholder(sp.clientId) || looksLikePlaceholder(sp.clientSecret)) {
+    throw new Error(
+      `Service principal file still has placeholder values (${SP_FILE}) — treating as not configured. ` +
+      `This is fine for the parity flow, which falls back to your signed-in user token.`,
+    );
   }
   return sp;
 }
@@ -306,6 +323,71 @@ export async function pollForUserToken(page: Page, timeoutMs?: number): Promise<
     }
   }
   return token;
+}
+
+// ── Cross-dataset filter-field validation ─────────────────────────────────────
+//
+// Power BI's embed SDK ACCEPTS a Basic filter whose table/column doesn't exist
+// in the report's model — no error is thrown; visuals just render without the
+// intended filtering. In a source-vs-target parity run whose two reports sit
+// on DIFFERENT datasets (the normal migration case), a filter field discovered
+// on one side may simply not exist on the other — producing a silently invalid
+// comparison (one side filtered, one side not). Observed in production.
+//
+// This validator asks each dataset directly, via one tiny executeQueries DAX
+// probe per field, BEFORE any report is embedded. It uses the signed-in user's
+// token (same Delegated permissions the rest of the flow relies on).
+
+export type FieldCheckStatus = 'ok' | 'missing' | 'unknown';
+
+export interface FieldCheckResult {
+  status: FieldCheckStatus;
+  /** Short diagnostic (error snippet / HTTP status) when not 'ok'. */
+  detail?: string;
+}
+
+/**
+ * Checks that `'table'[column]` exists in the given dataset. 'unknown' means
+ * the probe itself could not run (e.g. executeQueries disabled by the tenant,
+ * or no dataset permission) — callers should treat that as "could not
+ * validate", not as a failure.
+ */
+export async function validateDatasetField(
+  userToken: string,
+  datasetId: string,
+  table: string,
+  column: string,
+): Promise<FieldCheckResult> {
+  const t = table.replace(/'/g, "''");
+  const c = column.replace(/\]/g, ']]');
+  const dax = `EVALUATE TOPN(1, SELECTCOLUMNS('${t}', "v", '${t}'[${c}]))`;
+
+  try {
+    const res = await httpsPost(
+      `https://api.powerbi.com/v1.0/myorg/datasets/${datasetId}/executeQueries`,
+      JSON.stringify({ queries: [{ query: dax }], serializerSettings: { includeNulls: true } }),
+      { 'Content-Type': 'application/json', 'Authorization': `Bearer ${userToken}` },
+    );
+
+    if (res.status === 200) {
+      // executeQueries can also report errors inside a 200 body.
+      const inner = JSON.parse(res.body)?.results?.[0];
+      if (inner && inner.error) {
+        return { status: 'missing', detail: JSON.stringify(inner.error).slice(0, 200) };
+      }
+      return { status: 'ok' };
+    }
+    if (res.status === 400) {
+      // 400 = the DAX itself was rejected, which for this probe means the
+      // table or column doesn't exist in this dataset.
+      return { status: 'missing', detail: res.body.slice(0, 200) };
+    }
+    // 401/403/404/429/5xx — the probe couldn't run, which proves nothing
+    // about the field either way.
+    return { status: 'unknown', detail: `HTTP ${res.status}: ${res.body.slice(0, 120)}` };
+  } catch (e) {
+    return { status: 'unknown', detail: String(e).slice(0, 200) };
+  }
 }
 
 // ── Public: decode user email from a JWT access token (Node.js, no verify) ─────
