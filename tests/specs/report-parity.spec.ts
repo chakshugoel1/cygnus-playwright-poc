@@ -34,12 +34,16 @@ import {
 import {
   exportReportToWorkbook,
   writeParitySummary,
+  diffPageSets,
+  pageNameKey,
+  type ReportExportResult,
 } from '../helpers/report-export.helpers';
 import { compareWorkbooks } from '../helpers/excel-compare.helpers';
-import { pollForUserToken } from '../helpers/pbi-api.helpers';
+import { pollForUserToken, validateDatasetField } from '../helpers/pbi-api.helpers';
 import {
   getScenarios,
   selectionsForPage,
+  selectionsForSide,
   scenarioSlug,
   planFilterApplication,
   globalFiltersEnabled,
@@ -179,6 +183,110 @@ test('Report Parity — Import mode vs Direct Lake data validation', async ({ pa
     console.log(`\n[scenarios] ${configuredScenarios.length} filter scenario(s) configured: ${configuredScenarios.map(s => s.name).join(', ')}`);
   }
 
+  // ── Pre-flight: validate filter fields against BOTH datasets ──────────────
+  // Power BI's embed SDK silently ACCEPTS a filter whose table/column doesn't
+  // exist in a report's model — no error, the data just isn't filtered. When
+  // source and target sit on different datasets (the normal migration case), a
+  // field discovered on one side may not exist on the other, which produces a
+  // filtered-vs-unfiltered comparison that LOOKS like real data differences.
+  // Observed in production. So before embedding anything, probe each flat
+  // filter field against both datasets via executeQueries and refuse to
+  // proceed on a mismatch (CYGNUS_FILTER_FIELD_MISMATCH=skip drops the filter
+  // from BOTH sides instead; =ignore keeps the old blind behaviour, with the
+  // mismatch recorded as a caveat in the summary either way).
+  const FIELD_MISMATCH_POLICY = (process.env['CYGNUS_FILTER_FIELD_MISMATCH'] ?? 'abort').trim().toLowerCase();
+  const preflightCaveats: string[] = [];
+  if (configuredScenarios.length > 0) {
+    const flatFieldKey = (t: { table?: string; column?: string }) => `${t.table}${t.column}`;
+    // Tracks which side(s) each field actually needs validating against. A
+    // selection tagged sel.side (from the desktop app's cross-report "shared
+    // picker" - see buildScenarioFromPicks/sideTargets in app.js) only ever
+    // gets applied on that one side, so checking it against the OTHER side's
+    // dataset is meaningless and would wrongly abort a run whose two sides
+    // deliberately use two different table.column bindings for the "same"
+    // (title-matched) filter. An untagged selection still applies to both.
+    const fields = new Map<string, { table: string; column: string; sides: Set<'source' | 'target'> }>();
+    let hasHierarchy = false;
+    for (const sc of configuredScenarios) {
+      for (const sels of Object.values(sc.pages)) {
+        for (const sel of sels) {
+          if (sel.isHierarchy) { hasHierarchy = true; continue; }
+          const t = sel.targets?.[0];
+          if (sel.targets?.length === 1 && t?.table && t?.column) {
+            const key = flatFieldKey(t);
+            let entry = fields.get(key);
+            if (!entry) {
+              entry = { table: t.table, column: t.column, sides: new Set() };
+              fields.set(key, entry);
+            }
+            if (sel.side === 'source' || sel.side === 'target') entry.sides.add(sel.side);
+            else { entry.sides.add('source'); entry.sides.add('target'); }
+          }
+        }
+      }
+    }
+
+    if (fields.size > 0) {
+      console.log(`\n[preflight] Validating ${fields.size} filter field(s) against ${runSource && runTarget ? 'both datasets' : 'the dataset in scope'}...`);
+      const sides: Array<[string, 'source' | 'target', string]> = [];
+      if (runSource) sides.push(['SOURCE', 'source', pair.source.datasetId]);
+      if (runTarget) sides.push(['TARGET', 'target', pair.target.datasetId]);
+
+      const missingKeys = new Set<string>();
+      const missingDescriptions: string[] = [];
+      const unknownSides = new Set<string>();
+      for (const [key, f] of fields) {
+        for (const [sideName, sideKey, dsId] of sides) {
+          if (!f.sides.has(sideKey)) continue; // this field's selection(s) were never tagged for this side
+          const res = await validateDatasetField(token, dsId, f.table, f.column);
+          if (res.status === 'missing') {
+            missingKeys.add(key);
+            missingDescriptions.push(`'${f.table}'[${f.column}] does not exist in the ${sideName} dataset (${dsId})`);
+            console.warn(`    x '${f.table}'[${f.column}] - MISSING in ${sideName} dataset`);
+          } else if (res.status === 'unknown') {
+            if (!unknownSides.has(sideName)) {
+              unknownSides.add(sideName);
+              console.warn(`    ? cannot pre-validate fields against the ${sideName} dataset (${res.detail ?? 'probe failed'}) - continuing without validation for that side.`);
+            }
+          } else {
+            console.log(`    + '${f.table}'[${f.column}] exists in ${sideName} dataset`);
+          }
+        }
+      }
+      if (hasHierarchy) {
+        console.log('    (hierarchy filters cannot be pre-validated this way - a missing hierarchy visual is caught at apply time instead)');
+      }
+
+      if (missingDescriptions.length > 0) {
+        if (FIELD_MISMATCH_POLICY === 'skip') {
+          for (const sc of configuredScenarios) {
+            for (const pageName of Object.keys(sc.pages)) {
+              sc.pages[pageName] = sc.pages[pageName].filter(sel => {
+                const t = sel.targets?.[0];
+                return !(sel.targets?.length === 1 && t && missingKeys.has(flatFieldKey(t)));
+              });
+            }
+          }
+          for (const d of missingDescriptions) {
+            preflightCaveats.push(`Filter dropped from BOTH sides (CYGNUS_FILTER_FIELD_MISMATCH=skip): ${d}`);
+          }
+          console.warn(`    -> ${missingKeys.size} filter field(s) dropped from BOTH sides so the comparison stays like-for-like.`);
+        } else if (FIELD_MISMATCH_POLICY === 'ignore') {
+          for (const d of missingDescriptions) {
+            preflightCaveats.push(`Filter field mismatch IGNORED (CYGNUS_FILTER_FIELD_MISMATCH=ignore) - one side will not actually be filtered: ${d}`);
+          }
+        } else {
+          throw new Error(
+            `\n\n  FILTER FIELD MISMATCH - the comparison would be invalid (one side filtered, the other not):\n` +
+            missingDescriptions.map(m => `    - ${m}`).join('\n') +
+            `\n\n  Unselect these filters in the app (or discover filters on the side you are validating), then rerun.\n` +
+            `  Advanced: CYGNUS_FILTER_FIELD_MISMATCH=skip drops them from BOTH sides; =ignore proceeds anyway.\n`,
+          );
+        }
+      }
+    }
+  }
+
   // Per-scenario output paths. Unfiltered → original OUT_DIR (no subfolder).
   // Filtered → OUT_DIR/<scenario-slug>/ so each summary stays as readable as
   // the original, one folder per scenario.
@@ -209,10 +317,32 @@ test('Report Parity — Import mode vs Direct Lake data validation', async ({ pa
   // proven per-page path still runs for those fields as a safety net.
   const useGlobalFilters = globalFiltersEnabled();
 
-  const makeHooks = (sc: ScenarioOrNone) => {
+  // Filter-application failures per side, per scenario. A failure here means
+  // that page was exported UNFILTERED on that side (report-export's safety
+  // catch) — if the OTHER side applied the same filter successfully, the
+  // comparison for that run is invalid, and that must surface as a caveat in
+  // the summary rather than masquerade as a data difference.
+  type FilterIssue = { page: string; error: string };
+
+  const makeHooks = (sc: ScenarioOrNone, filterIssues: FilterIssue[], side: 'source' | 'target') => {
     if (sc === UNFILTERED) return { beforeExport: undefined, perPageHook: undefined };
 
-    const plan = useGlobalFilters ? planFilterApplication(sc) : null;
+    // A selection tagged `side: 'source'` or `side: 'target'` (set by the
+    // desktop app's cross-report filter matching when the two reports'
+    // filters turned out NOT to be identical - see selectionsForSide's
+    // doc comment) must never reach the OTHER side's export at all.
+    // Filtering it out of the scenario view here, before anything else
+    // touches `sc`, means planFilterApplication/selectionsForPage/etc
+    // below need zero awareness of `side` - they just never see a
+    // selection that doesn't belong to this side.
+    const sc_: SlicerScenario = {
+      name: sc.name,
+      pages: Object.fromEntries(
+        Object.entries(sc.pages).map(([pageName, sels]) => [pageName, selectionsForSide(sels, side)]),
+      ),
+    };
+
+    const plan = useGlobalFilters ? planFilterApplication(sc_) : null;
     if (plan && plan.global.length > 0) {
       console.log(`      (global-filter fast path: ${plan.global.length} field(s) will apply once instead of per-page)`);
     }
@@ -236,7 +366,7 @@ test('Report Parity — Import mode vs Direct Lake data validation', async ({ pa
         console.warn(`      ⚠ global filter batch failed — falling back to per-page for all ${plan.global.length} field(s): ${(e as Error).message}`);
         for (const g of plan.global) {
           for (const pageName of g.pages) {
-            const original = selectionsForPage(sc, pageName).find(
+            const original = selectionsForPage(sc_, pageName).find(
               s => s.targets && s.targets.length === 1 &&
                    s.targets[0].table === g.targets[0].table && s.targets[0].column === g.targets[0].column,
             );
@@ -247,7 +377,16 @@ test('Report Parity — Import mode vs Direct Lake data validation', async ({ pa
     };
 
     const perPageHook = async (p: import('@playwright/test').Page, pageDisplayName: string): Promise<void> => {
-      const selections = plan ? getForPageCI(plan.perPage, pageDisplayName) : selectionsForPage(sc, pageDisplayName);
+      try {
+        await applySelectionsForPage(p, pageDisplayName);
+      } catch (e) {
+        filterIssues.push({ page: pageDisplayName, error: (e as Error).message });
+        throw e; // report-export's catch still logs it and exports the page unfiltered
+      }
+    };
+
+    const applySelectionsForPage = async (p: import('@playwright/test').Page, pageDisplayName: string): Promise<void> => {
+      const selections = plan ? getForPageCI(plan.perPage, pageDisplayName) : selectionsForPage(sc_, pageDisplayName);
       if (selections.length === 0) return; // "None" for this page
 
       // Visual-based selections (hierarchy, or explicit visualName) are each
@@ -302,13 +441,15 @@ test('Report Parity — Import mode vs Direct Lake data validation', async ({ pa
     }
 
     // ── Export SOURCE (Import mode) → expected.xlsx ─────────────────────────
+    let srcResult: ReportExportResult | null = null;
+    const srcFilterIssues: { page: string; error: string }[] = [];
     if (runSource) {
       console.log(`\n[2] SOURCE (${SOURCE_LABEL}) → expected values ${P.label}`);
       applyReportIdentity(pair.source);
-      const srcHooks = makeHooks(sc); // fresh plan — independent from target's
+      const srcHooks = makeHooks(sc, srcFilterIssues, 'source'); // fresh plan — independent from target's
       const srcPage = await context.newPage();
       try {
-        await exportReportToWorkbook(srcPage, token, {
+        srcResult = await exportReportToWorkbook(srcPage, token, {
           outPath:     P.expected,
           pagesFilter: sourcePagesFilter,
           label:       `source (${SOURCE_LABEL}) ${P.label}`,
@@ -323,13 +464,15 @@ test('Report Parity — Import mode vs Direct Lake data validation', async ({ pa
     }
 
     // ── Export TARGET (Direct Lake) → actual.xlsx ───────────────────────────
+    let tgtResult: ReportExportResult | null = null;
+    const tgtFilterIssues: { page: string; error: string }[] = [];
     if (runTarget) {
       console.log(`\n[3] TARGET (${TARGET_LABEL}) → actual values ${P.label}`);
       applyReportIdentity(pair.target);
-      const tgtHooks = makeHooks(sc); // fresh plan — independent from source's
+      const tgtHooks = makeHooks(sc, tgtFilterIssues, 'target'); // fresh plan — independent from source's
       const tgtPage = await context.newPage();
       try {
-        await exportReportToWorkbook(tgtPage, token, {
+        tgtResult = await exportReportToWorkbook(tgtPage, token, {
           outPath:      P.actual,
           pagesFilter:  targetPagesFilter,
           sheetNameFor: (displayName: string) => inverseMap[displayName] ?? displayName,
@@ -357,9 +500,69 @@ test('Report Parity — Import mode vs Direct Lake data validation', async ({ pa
     expect(fs.existsSync(P.expected), `Missing expected baseline: ${P.expected}`).toBe(true);
     expect(fs.existsSync(P.actual),   `Missing actual export: ${P.actual}`).toBe(true);
 
+    // ── Comparison validity: caveats + page alignment ───────────────────────
+    // Anything in `caveats` means the two exports were NOT produced under
+    // identical conditions, so the comparison can't be trusted either way —
+    // the summary's verdict becomes "NOT COMPARABLE" instead of PASS/FAIL.
+    const caveats: string[] = [...preflightCaveats];
+    for (const i of srcFilterIssues) {
+      caveats.push(`Filter application FAILED on SOURCE page "${i.page}" — that page was exported UNFILTERED on the source side. (${i.error})`);
+    }
+    for (const i of tgtFilterIssues) {
+      caveats.push(`Filter application FAILED on TARGET page "${i.page}" — that page was exported UNFILTERED on the target side. (${i.error})`);
+    }
+    if (srcResult && srcResult.requestedPagesMissing.length > 0) {
+      caveats.push(`Requested page(s) not found in the SOURCE report (renamed or removed?): ${srcResult.requestedPagesMissing.join(', ')}`);
+    }
+    if (tgtResult && tgtResult.requestedPagesMissing.length > 0) {
+      caveats.push(`Requested page(s) not found in the TARGET report (renamed or removed?): ${tgtResult.requestedPagesMissing.join(', ')}`);
+    }
+
+    // Full page-set alignment between the two reports (informational — extra
+    // junk pages on one side don't invalidate a comparison that was scoped to
+    // specific pages, but the summary should say the reports' page sets differ).
+    let pageAlignment: { onlyInSource: string[]; onlyInTarget: string[]; inBothCount: number } | undefined;
+    if (srcResult && tgtResult) {
+      const align = diffPageSets(
+        srcResult.pagesFound.map(p => p.displayName),
+        tgtResult.pagesFound.map(p => p.displayName),
+        pageMap,
+      );
+      pageAlignment = { onlyInSource: align.onlyInSource, onlyInTarget: align.onlyInTarget, inBothCount: align.inBoth.length };
+      if (align.onlyInSource.length > 0 || align.onlyInTarget.length > 0) {
+        console.log('\n[page-check] The two reports do NOT have identical page sets:');
+        if (align.onlyInSource.length > 0) console.log(`    only in SOURCE report: ${align.onlyInSource.join(' | ')}`);
+        if (align.onlyInTarget.length > 0) console.log(`    only in TARGET report: ${align.onlyInTarget.join(' | ')}`);
+        console.log(`    in both: ${align.inBoth.length} page(s)`);
+      }
+    }
+
     // ── Compare + summary ───────────────────────────────────────────────────
     console.log(`\n[4] Comparing expected (source) vs actual (target) ${P.label}...`);
     const diff = await compareWorkbooks(P.expected, P.actual);
+
+    // Read-back sanity check: every sheet we KNOW was just written must have
+    // been seen by the comparator. Guards against the corrupted/partial-read
+    // failure mode where a comparison quietly runs against a subset of the
+    // data (observed once as sheets coming back as "Sheet1/Sheet2/Sheet3").
+    const readBackCheck = (written: ReportExportResult | null, side: 'expected' | 'actual', file: string) => {
+      if (!written) return;
+      const seen = new Set(
+        diff.sheets
+          .filter(s => (side === 'expected' ? s.inExpected : s.inActual))
+          .map(s => pageNameKey(s.sheet)),
+      );
+      for (const e of written.exported) {
+        if (!seen.has(pageNameKey(e.sheetName))) {
+          throw new Error(
+            `Read-back mismatch: sheet "${e.sheetName}" was written to ${path.basename(file)} this run ` +
+            `but the comparator did not see it. The file may be corrupted — rerun this scenario.`,
+          );
+        }
+      }
+    };
+    readBackCheck(srcResult, 'expected', P.expected);
+    readBackCheck(tgtResult, 'actual', P.actual);
 
     const { passed, differingSheets } = await writeParitySummary(
       diff,
@@ -372,9 +575,16 @@ test('Report Parity — Import mode vs Direct Lake data validation', async ({ pa
         targetReportId: pair.target.reportId,
         expectedFile:   P.expected,
         actualFile:     P.actual,
+        comparisonCaveats: caveats,
+        pageAlignment,
       },
       P.summary,
     );
+
+    if (caveats.length > 0) {
+      console.log('\n  ⚠⚠⚠ COMPARISON CAVEATS — this run is NOT a valid like-for-like comparison:');
+      for (const c of caveats) console.log(`    - ${c}`);
+    }
 
     const strictIdentical = diff.sheets.filter(s => s.identical).length;
     const headerOnly       = diff.sheets.filter(s => !s.identical && s.dataIdentical).length;

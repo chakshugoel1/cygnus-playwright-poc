@@ -182,6 +182,20 @@
       display: inline;
       cursor: pointer;
     }
+    .option-toggle-lg {
+      align-items: center;
+    }
+    .option-toggle-lg input[type="checkbox"] {
+      width: 20px;
+      height: 20px;
+      margin-top: 0;
+      cursor: pointer;
+    }
+    .option-toggle-lg label {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--ink);
+    }
 
     /* ── Buttons ────────────────────────────────────────────────────────── */
     .actions {
@@ -271,6 +285,28 @@
     }
     .badge.hierarchy { background: var(--warn-bg); color: var(--warn-ink); }
 
+    /* ── Cross-report filter mismatch (split picker) ───────────────────── */
+    .mismatch-banner {
+      background: var(--warn-bg);
+      color: var(--warn-ink);
+      border: 1px solid var(--warn-ink);
+      border-radius: var(--radius-sm);
+      padding: var(--space-3);
+      font-size: 12px;
+      font-weight: 600;
+      margin-bottom: var(--space-3);
+    }
+    .split-columns {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: var(--space-4);
+      align-items: start;
+    }
+    .split-column > .section-title {
+      margin-bottom: var(--space-2);
+    }
+    .split-column .discover-page + .discover-page { margin-top: var(--space-2); }
+
     .placeholder {
       font-size: 12px;
       color: var(--faint);
@@ -281,6 +317,7 @@
       .grid { grid-template-columns: 1fr; }
       .row { grid-template-columns: 1fr; gap: var(--space-1); }
       label { white-space: normal; }
+      .split-columns { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -316,16 +353,10 @@
         </div>
       </div>
       <div class="note">Leave pages blank to run every page in the report. This list also scopes which pages "Discover Filters" crawls.</div>
-      <div class="option-toggle">
-        <input type="checkbox" id="applyGlobalFlatFilters" />
-        <label for="applyGlobalFlatFilters">
-          Apply discovered flat filters to all report pages (hierarchy filters stay page-specific).
-        </label>
-      </div>
-      <div class="option-toggle">
+      <div class="option-toggle option-toggle-lg">
         <input type="checkbox" id="lenientTextCompare" />
         <label for="lenientTextCompare">
-          Lenient text compare: treat case/space/underscore/hyphen differences as equal in parity compare.
+          Case insensitive compare
         </label>
       </div>
       <div class="note">
