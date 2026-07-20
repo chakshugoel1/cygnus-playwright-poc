@@ -64,9 +64,39 @@ function appendLog(line) {
   logEl.scrollTop = logEl.scrollHeight;
 }
 
-function setBusy(isBusy) {
-  buttons.forEach(b => { b.disabled = isBusy; });
+// Discover Filters can't complete without a saved login session: it runs
+// with --no-deps (skips the interactive 'setup' auth step, deliberately, so
+// discovery doesn't force a fresh sign-in every time), and cross-report
+// discovery specifically runs its browser windows off-screen for speed - so
+// if a Microsoft sign-in page ever appeared, there would be no way to see or
+// interact with it. Gate the button on a known-good session instead of
+// letting that run start and fail confusingly.
+let _isBusy = false;
+let _hasSession = false;
+
+function updateButtonStates() {
+  buttons.forEach(b => { b.disabled = _isBusy; });
+  const discoverBtn = document.getElementById('btnDiscover');
+  discoverBtn.disabled = _isBusy || !_hasSession;
+  const note = document.getElementById('discoverAuthNote');
+  if (note) note.style.display = (!_isBusy && !_hasSession) ? 'block' : 'none';
 }
+
+function setBusy(isBusy) {
+  _isBusy = isBusy;
+  updateButtonStates();
+}
+
+async function refreshAuthGate() {
+  try {
+    const status = await window.cygnusDesktop.getAuthStatus();
+    _hasSession = !!(status && status.hasSession);
+  } catch {
+    _hasSession = false;
+  }
+  updateButtonStates();
+}
+refreshAuthGate();
 
 function readIdentity(prefix) {
   const obj = {};
@@ -174,13 +204,17 @@ function dedupePageNames(names) {
 
 window.cygnusDesktop.onLog((line) => appendLog(line));
 window.cygnusDesktop.onState((state) => {
+  // Display only - button enablement is driven by onBusy below, which spans
+  // the WHOLE flow (e.g. all of Auth+Parity), not just whichever individual
+  // step this text currently names. See beginFlow/endFlow in main.js.
   statusEl.textContent = `State: ${state}`;
-  setBusy(state !== 'Idle');
 });
+window.cygnusDesktop.onBusy((isBusy) => setBusy(isBusy));
 
 document.getElementById('btnSetup').addEventListener('click', async () => {
   appendLog('--- Running setup only ---');
   await window.cygnusDesktop.runSetup();
+  await refreshAuthGate();
 });
 
 document.getElementById('btnParity').addEventListener('click', async () => {
@@ -214,6 +248,7 @@ document.getElementById('btnParity').addEventListener('click', async () => {
   } else {
     await window.cygnusDesktop.runSetupAndParity(cfg);
   }
+  await refreshAuthGate();
 });
 
 document.getElementById('btnBoth').addEventListener('click', async () => {
@@ -225,6 +260,7 @@ document.getElementById('btnBoth').addEventListener('click', async () => {
   }
   appendLog('--- Running setup + parity ---');
   await window.cygnusDesktop.runSetupAndParity(cfg);
+  await refreshAuthGate();
 });
 
 // ── Filter discovery + picking ───────────────────────────────────────────────
@@ -598,19 +634,41 @@ function renderMatchedDiscoverResults(result) {
 
   // Pair up by normalized title - matchDetails.identical already guarantees
   // every source field has exactly one title+hierarchy-ness counterpart in
-  // target and vice versa (see matchDiscoveredFields in
-  // cross-report-match.helpers.ts), so this pairing cannot come up empty on
-  // either side or hit a hierarchy-ness mismatch.
+  // target and vice versa, AND that no title resolves to more than one
+  // distinct field binding on either side (see duplicateTitleConflicts in
+  // matchDiscoveredFields, cross-report-match.helpers.ts) - so this pairing
+  // should never need to choose between more than one candidate. The
+  // grouping-by-title below still defends against it happening anyway: it
+  // is exactly what produced a real bug previously (two "Bewerbungseingang
+  // Cluster" slicers on different fields both getting silently paired to
+  // the SAME target field). If a title ever has more than one distinct
+  // variant on either side here, skip it rather than guess.
+  const sourceGroupsByTitleKey = new Map();
+  for (const g of sourceGroups.values()) {
+    const tk = pageNameKeyJs(g.title);
+    const list = sourceGroupsByTitleKey.get(tk);
+    if (list) list.push(g); else sourceGroupsByTitleKey.set(tk, [g]);
+  }
   const targetGroupsByTitleKey = new Map();
-  for (const g of targetGroups.values()) targetGroupsByTitleKey.set(pageNameKeyJs(g.title), g);
+  for (const g of targetGroups.values()) {
+    const tk = pageNameKeyJs(g.title);
+    const list = targetGroupsByTitleKey.get(tk);
+    if (list) list.push(g); else targetGroupsByTitleKey.set(tk, [g]);
+  }
 
   const container = document.getElementById('discoverResults');
   container.innerHTML = '';
 
   const merged = [];
-  for (const sourceGroup of sourceGroups.values()) {
-    const targetGroup = targetGroupsByTitleKey.get(pageNameKeyJs(sourceGroup.title));
-    if (!targetGroup) continue; // should not happen when result.identical is true
+  for (const [titleKey, srcGroupsForTitle] of sourceGroupsByTitleKey) {
+    const tgtGroupsForTitle = targetGroupsByTitleKey.get(titleKey);
+    if (!tgtGroupsForTitle) continue; // should not happen when result.identical is true
+    if (srcGroupsForTitle.length > 1 || tgtGroupsForTitle.length > 1) {
+      console.warn(`[cygnus] Shared picker: "${srcGroupsForTitle[0].title}" has more than one distinct field binding on at least one side - skipping rather than guessing which pairs with which. This should not happen when identical=true.`);
+      continue;
+    }
+    const sourceGroup = srcGroupsForTitle[0];
+    const targetGroup = tgtGroupsForTitle[0];
     merged.push({ key: fieldKey(sourceGroup.title, sourceGroup.targetLabel), sourceGroup, targetGroup });
   }
 
@@ -664,6 +722,7 @@ function renderSplitDiscoverResults(result) {
   if (d.onlyInSource && d.onlyInSource.length) reasons.push(`only in Source: ${d.onlyInSource.join(', ')}`);
   if (d.onlyInTarget && d.onlyInTarget.length) reasons.push(`only in Target: ${d.onlyInTarget.join(', ')}`);
   if (d.hierarchyMismatch && d.hierarchyMismatch.length) reasons.push(`type differs (flat vs hierarchy): ${d.hierarchyMismatch.join(', ')}`);
+  if (d.duplicateTitleConflicts && d.duplicateTitleConflicts.length) reasons.push(`same title, different field on at least one side: ${d.duplicateTitleConflicts.join(', ')}`);
 
   const banner = document.createElement('div');
   banner.className = 'mismatch-banner';
@@ -704,17 +763,31 @@ function renderSplitDiscoverResults(result) {
 }
 
 document.getElementById('btnDiscover').addEventListener('click', async () => {
+  // Defense in depth: the button is already disabled without a session, but
+  // re-check at click time in case the UI state is ever stale - starting
+  // this run with no session is a guaranteed, confusing failure (see
+  // updateButtonStates's comment for why).
+  await refreshAuthGate();
+  if (!_hasSession) {
+    appendLog('--- Cannot discover filters: no saved login session. Run Authentication first. ---');
+    return;
+  }
+
   const pairName = document.getElementById('pairName').value.trim() || 'Cygnus';
+  const skipGlobalCheck = document.getElementById('discoverSkipGlobalCheck')?.checked === true;
 
   if (bothIdentitiesFilled()) {
     const source = readIdentity('source');
     const target = readIdentity('target');
     appendLog('--- Discovering filters on BOTH reports (comparing source vs target) ---');
+    if (skipGlobalCheck) {
+      appendLog('--- Skipping report-level filter check (uncheck the box above to re-enable) ---');
+    }
     document.getElementById('globalFiltersResult').textContent = '';
     document.getElementById('pageScopeResult').textContent = 'Loading page list…';
     document.getElementById('discoverResults').textContent = 'Discovering source, then target… two fast first-match scans, one after the other.';
 
-    const res = await window.cygnusDesktop.discoverCrossReport(pairName, source, target);
+    const res = await window.cygnusDesktop.discoverCrossReport(pairName, source, target, skipGlobalCheck);
     if (!res.ok) {
       document.getElementById('pageScopeResult').textContent = '';
       document.getElementById('discoverResults').textContent = `Discovery failed: ${res.error}`;
@@ -745,16 +818,16 @@ document.getElementById('btnDiscover').addEventListener('click', async () => {
   }
 
   appendLog(pagesCsv
-    ? `--- Discovering filters: global check + pages [${pagesCsv}] (applies nothing) ---`
-    : '--- Discovering filters: global check only (applies nothing) ---');
+    ? `--- Discovering filters: ${skipGlobalCheck ? 'pages' : 'global check + pages'} [${pagesCsv}] (applies nothing) ---`
+    : `--- Discovering filters: ${skipGlobalCheck ? '(global check skipped)' : 'global check only'} (applies nothing) ---`);
   if (!pagesCsvInput && pagesCsv) {
     appendLog('--- Discovery scope source: selected pages from top page selector ---');
   }
   appendLog(`--- Using ${side === 'target' ? 'Target' : 'Source'} report entered above ---`);
-  document.getElementById('globalFiltersResult').textContent = 'Checking…';
+  document.getElementById('globalFiltersResult').textContent = skipGlobalCheck ? '' : 'Checking…';
   document.getElementById('pageScopeResult').textContent = 'Loading page list…';
   document.getElementById('discoverResults').textContent = pagesCsv ? 'Crawling pages… this can take a while on a page-heavy report.' : '';
-  const res = await window.cygnusDesktop.discoverSlicers(pairName, pagesCsv, identity, side);
+  const res = await window.cygnusDesktop.discoverSlicers(pairName, pagesCsv, identity, side, skipGlobalCheck);
   if (!res.ok) {
     document.getElementById('globalFiltersResult').textContent = '';
     document.getElementById('discoverResults').textContent = `Discovery failed: ${res.error}`;

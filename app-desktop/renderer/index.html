@@ -384,8 +384,17 @@
       <div class="note">
         Discovering is read-only. Values you pick below apply on your next Run Parity.
       </div>
+      <div class="option-toggle">
+        <input type="checkbox" id="discoverSkipGlobalCheck" />
+        <label for="discoverSkipGlobalCheck">
+          Skip report-level filter check (faster — only use once you've confirmed this report doesn't use them).
+        </label>
+      </div>
       <div class="actions">
         <button id="btnDiscover" class="secondary">Discover Filters</button>
+      </div>
+      <div class="note" id="discoverAuthNote" style="display:none; color: var(--danger);">
+        Run Authentication (or Run Auth + Parity) first — no saved login session yet. Discovery can't sign you in itself.
       </div>
       <div id="globalFiltersResult">
         <div class="placeholder">No global filters checked yet.</div>

@@ -47,6 +47,16 @@ function field(title: string, isHierarchy = false): DiscoveredSlicer {
   };
 }
 
+/** Same title, but an explicit (possibly different) underlying binding —
+ *  for the duplicate-title-different-field scenario. */
+function fieldWithBinding(title: string, binding: string, isHierarchy = false): DiscoveredSlicer {
+  return {
+    name: `v-${title}-${binding}`, title, kind: isHierarchy ? 'tree' : 'flat',
+    targetLabel: binding, targets: [{ table: 'T', column: binding }],
+    options: ['A', 'B'], selected: [], isHierarchy, errorMessage: null,
+  };
+}
+
 test.describe('matchDiscoveredFields', () => {
   test('identical when every title matches on both sides (exact)', () => {
     const src = [field('Recruitingweg'), field('Status')];
@@ -102,6 +112,52 @@ test.describe('matchDiscoveredFields', () => {
     const tgt = [field('Status')];
     const r = matchDiscoveredFields(src, tgt);
     expect(r.identical).toBe(true);
+  });
+
+  test('same title, SAME binding repeated (a genuinely duplicated visual) still collapses to one variant and matches normally', () => {
+    const src = [fieldWithBinding('Status', 'T.Status'), fieldWithBinding('Status', 'T.Status')];
+    const tgt = [fieldWithBinding('Status', 'T.Status')];
+    const r = matchDiscoveredFields(src, tgt);
+    expect(r.identical).toBe(true);
+    expect(r.duplicateTitleConflicts).toEqual([]);
+  });
+
+  // Real production case: two slicers on the source report share a title
+  // ("Bewerbungseingang Cluster") but are bound to two DIFFERENT fields.
+  // Matching by title alone would silently pair the extra source variant to
+  // whichever single target field shares that title - wrong for one of them,
+  // with no warning. This must never auto-match, regardless of what the
+  // single target-side field's binding is.
+  test('same title, different field binding on source only: NOT identical, flagged as a duplicate-title conflict', () => {
+    const src = [
+      fieldWithBinding('Cluster', "'Germany - Extract'.Recruitment Area"),
+      fieldWithBinding('Cluster', "'Fabric_application'.Recruitment Area"),
+    ];
+    const tgt = [fieldWithBinding('Cluster', "'V_FACT_APPLICATION_GERMANY'.RECRUITMENT_AREA")];
+    const r = matchDiscoveredFields(src, tgt);
+    expect(r.identical).toBe(false);
+    expect(r.duplicateTitleConflicts).toEqual(['Cluster']);
+    expect(r.matchedTitles).toEqual([]);
+  });
+
+  test('same title, different bindings with MATCHING variant counts on both sides: still not auto-matched (pairing would be a guess)', () => {
+    const src = [fieldWithBinding('Card', 'A.One'), fieldWithBinding('Card', 'A.Two')];
+    const tgt = [fieldWithBinding('Card', 'B.One'), fieldWithBinding('Card', 'B.Two')];
+    const r = matchDiscoveredFields(src, tgt);
+    expect(r.identical).toBe(false);
+    expect(r.duplicateTitleConflicts).toEqual(['Card']);
+  });
+
+  test('a duplicate-title conflict on one title does not block other, cleanly-matched titles from matching', () => {
+    const src = [
+      fieldWithBinding('Cluster', 'A.1'), fieldWithBinding('Cluster', 'A.2'),
+      field('Status'),
+    ];
+    const tgt = [fieldWithBinding('Cluster', 'B.1'), field('Status')];
+    const r = matchDiscoveredFields(src, tgt);
+    expect(r.identical).toBe(false); // overall still not safe to share
+    expect(r.duplicateTitleConflicts).toEqual(['Cluster']);
+    expect(r.matchedTitles).toEqual(['Status']);
   });
 });
 
