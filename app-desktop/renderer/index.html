@@ -182,6 +182,20 @@
       display: inline;
       cursor: pointer;
     }
+    .option-toggle-lg {
+      align-items: center;
+    }
+    .option-toggle-lg input[type="checkbox"] {
+      width: 20px;
+      height: 20px;
+      margin-top: 0;
+      cursor: pointer;
+    }
+    .option-toggle-lg label {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--ink);
+    }
 
     /* ── Buttons ────────────────────────────────────────────────────────── */
     .actions {
@@ -339,16 +353,10 @@
         </div>
       </div>
       <div class="note">Leave pages blank to run every page in the report. This list also scopes which pages "Discover Filters" crawls.</div>
-      <div class="option-toggle">
-        <input type="checkbox" id="applyGlobalFlatFilters" />
-        <label for="applyGlobalFlatFilters">
-          Apply discovered flat filters to all report pages (hierarchy filters stay page-specific).
-        </label>
-      </div>
-      <div class="option-toggle">
+      <div class="option-toggle option-toggle-lg">
         <input type="checkbox" id="lenientTextCompare" />
         <label for="lenientTextCompare">
-          Lenient text compare: treat case/space/underscore/hyphen differences as equal in parity compare.
+          Case insensitive compare
         </label>
       </div>
       <div class="note">

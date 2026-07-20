@@ -88,7 +88,6 @@ function buildConfig() {
   const pairName = document.getElementById('pairName').value.trim() || 'Cygnus';
   const pages = getSelectedRunPages();
   const slicerScenario = buildScenarioFromPicks(pages);
-  const applyGlobalFlatFilters = document.getElementById('applyGlobalFlatFilters')?.checked === true;
   const lenientTextCompare = document.getElementById('lenientTextCompare')?.checked === true;
 
   return {
@@ -97,7 +96,6 @@ function buildConfig() {
     target,
     pages: pages.length ? pages : undefined,
     slicerScenario,
-    applyGlobalFlatFilters,
     lenientTextCompare,
   };
 }
@@ -207,11 +205,8 @@ document.getElementById('btnParity').addEventListener('click', async () => {
   appendLog(filterCount > 0
     ? `--- Running parity (${filterCount} filter selection(s) applied) ---`
     : '--- Running parity (unfiltered) ---');
-  if (cfg.applyGlobalFlatFilters) {
-    appendLog('--- Flat field filters: apply once at report level (all pages) ---');
-  }
   if (cfg.lenientTextCompare) {
-    appendLog('--- Lenient text compare enabled (case/space/underscore/hyphen differences ignored) ---');
+    appendLog('--- Case insensitive compare enabled (case/space/underscore/hyphen differences ignored) ---');
   }
 
   if (authStatus.hasSession) {

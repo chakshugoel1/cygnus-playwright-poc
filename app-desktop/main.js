@@ -257,10 +257,12 @@ async function runParity(config) {
     extraEnv.CYGNUS_SLICER_CONFIG_PATH = scenarioPath;
   }
 
-  if (config.applyGlobalFlatFilters) {
-    extraEnv.CYGNUS_SLICER_GLOBAL_FILTERS = '1';
-    emitLog('[desktop-runner] Flat field filters will be applied at report level (all pages).');
-  }
+  // Always on: batching a repeated flat-field filter into one report-level
+  // setFilters() call instead of once per page is a pure speed optimization
+  // with a per-page fallback if it fails (see planFilterApplication /
+  // CYGNUS_SLICER_GLOBAL_FILTERS in slicer-config.helpers.ts) - no longer a
+  // user-facing toggle since there's no downside to leaving it on.
+  extraEnv.CYGNUS_SLICER_GLOBAL_FILTERS = '1';
 
   if (config.lenientTextCompare) {
     extraEnv.CYGNUS_COMPARE_TEXT_LENIENT = '1';
