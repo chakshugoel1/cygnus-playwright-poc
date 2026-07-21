@@ -64,9 +64,39 @@ function appendLog(line) {
   logEl.scrollTop = logEl.scrollHeight;
 }
 
-function setBusy(isBusy) {
-  buttons.forEach(b => { b.disabled = isBusy; });
+// Discover Filters can't complete without a saved login session: it runs
+// with --no-deps (skips the interactive 'setup' auth step, deliberately, so
+// discovery doesn't force a fresh sign-in every time), and cross-report
+// discovery specifically runs its browser windows off-screen for speed - so
+// if a Microsoft sign-in page ever appeared, there would be no way to see or
+// interact with it. Gate the button on a known-good session instead of
+// letting that run start and fail confusingly.
+let _isBusy = false;
+let _hasSession = false;
+
+function updateButtonStates() {
+  buttons.forEach(b => { b.disabled = _isBusy; });
+  const discoverBtn = document.getElementById('btnDiscover');
+  discoverBtn.disabled = _isBusy || !_hasSession;
+  const note = document.getElementById('discoverAuthNote');
+  if (note) note.style.display = (!_isBusy && !_hasSession) ? 'block' : 'none';
 }
+
+function setBusy(isBusy) {
+  _isBusy = isBusy;
+  updateButtonStates();
+}
+
+async function refreshAuthGate() {
+  try {
+    const status = await window.cygnusDesktop.getAuthStatus();
+    _hasSession = !!(status && status.hasSession);
+  } catch {
+    _hasSession = false;
+  }
+  updateButtonStates();
+}
+refreshAuthGate();
 
 function readIdentity(prefix) {
   const obj = {};
@@ -174,13 +204,17 @@ function dedupePageNames(names) {
 
 window.cygnusDesktop.onLog((line) => appendLog(line));
 window.cygnusDesktop.onState((state) => {
+  // Display only - button enablement is driven by onBusy below, which spans
+  // the WHOLE flow (e.g. all of Auth+Parity), not just whichever individual
+  // step this text currently names. See beginFlow/endFlow in main.js.
   statusEl.textContent = `State: ${state}`;
-  setBusy(state !== 'Idle');
 });
+window.cygnusDesktop.onBusy((isBusy) => setBusy(isBusy));
 
 document.getElementById('btnSetup').addEventListener('click', async () => {
   appendLog('--- Running setup only ---');
   await window.cygnusDesktop.runSetup();
+  await refreshAuthGate();
 });
 
 document.getElementById('btnParity').addEventListener('click', async () => {
@@ -208,12 +242,13 @@ document.getElementById('btnParity').addEventListener('click', async () => {
   if (cfg.lenientTextCompare) {
     appendLog('--- Case insensitive compare enabled (case/space/underscore/hyphen differences ignored) ---');
   }
+  document.getElementById('parityResults').innerHTML = '';
 
-  if (authStatus.hasSession) {
-    await window.cygnusDesktop.runParity(cfg);
-  } else {
-    await window.cygnusDesktop.runSetupAndParity(cfg);
-  }
+  const res = authStatus.hasSession
+    ? await window.cygnusDesktop.runParity(cfg)
+    : await window.cygnusDesktop.runSetupAndParity(cfg);
+  if (res.ok) renderParityResults(res.result);
+  await refreshAuthGate();
 });
 
 document.getElementById('btnBoth').addEventListener('click', async () => {
@@ -224,7 +259,10 @@ document.getElementById('btnBoth').addEventListener('click', async () => {
     return;
   }
   appendLog('--- Running setup + parity ---');
-  await window.cygnusDesktop.runSetupAndParity(cfg);
+  document.getElementById('parityResults').innerHTML = '';
+  const res = await window.cygnusDesktop.runSetupAndParity(cfg);
+  if (res.ok) renderParityResults(res.result);
+  await refreshAuthGate();
 });
 
 // ── Filter discovery + picking ───────────────────────────────────────────────
@@ -488,6 +526,129 @@ function renderGlobalFilters(globalFilters) {
   el.appendChild(pageDiv);
 }
 
+// ── Parity results (in-page summary of parity-result.json) ──────────────────
+//
+// A more detailed, always-visible alternative to opening parity-summary.xlsx
+// by hand - NOT a replacement for it. Full per-visual detail (sample rows,
+// etc.) stays exclusive to the xlsx; this view is page-level, plus a link to
+// open each of the three generated files for anyone who wants to go deeper.
+
+const VERDICT_BADGE = {
+  pass:          { cls: 'badge lg',        text: '✅ PASS' },
+  fail:          { cls: 'badge lg fail',   text: '❌ FAIL' },
+  not_comparable: { cls: 'badge lg review', text: '⚠️ NOT COMPARABLE' },
+};
+
+const PAGE_STATUS_BADGE = {
+  'identical':       { cls: 'badge',        text: 'Identical' },
+  'header-only':     { cls: 'badge',        text: 'Labels differ only' },
+  'different':       { cls: 'badge fail',   text: 'Different' },
+  'only-in-source':  { cls: 'badge review', text: 'Missing in Target' },
+  'only-in-target':  { cls: 'badge review', text: 'Only in Target' },
+};
+
+async function openOutputFile(filePath, label) {
+  const res = await window.cygnusDesktop.openOutputFile(filePath);
+  if (!res.ok) appendLog(`--- Could not open ${label}: ${res.error} ---`);
+}
+
+function renderParityResults(result) {
+  const el = document.getElementById('parityResults');
+  el.innerHTML = '';
+
+  if (!result) {
+    el.innerHTML = '<div class="note">No parity summary to show yet — either this was a source-only run (nothing was compared), or the run did not get far enough to produce one. Check the log above.</div>';
+    return;
+  }
+
+  const heading = document.createElement('div');
+  heading.className = 'section-title';
+  heading.style.marginTop = 'var(--space-3)';
+  heading.textContent = 'Parity results';
+  el.appendChild(heading);
+
+  for (const sc of result.scenarios || []) {
+    const pageDiv = document.createElement('div');
+    pageDiv.className = 'discover-page';
+
+    const h3 = document.createElement('h3');
+    h3.textContent = sc.name && sc.name !== '(unfiltered)' ? `Scenario: ${sc.name}` : 'Result';
+    pageDiv.appendChild(h3);
+
+    const verdictRow = document.createElement('div');
+    verdictRow.className = 'parity-verdict';
+    const verdict = VERDICT_BADGE[sc.ui.verdict] || VERDICT_BADGE.fail;
+    const verdictBadge = document.createElement('span');
+    verdictBadge.className = verdict.cls;
+    verdictBadge.textContent = verdict.text;
+    verdictRow.appendChild(verdictBadge);
+    if (sc.ui.differingSheets > 0) {
+      const note = document.createElement('span');
+      note.className = 'note';
+      note.textContent = `${sc.ui.differingSheets} page(s) with real differences`;
+      verdictRow.appendChild(note);
+    }
+    pageDiv.appendChild(verdictRow);
+
+    for (const line of sc.ui.narrative || []) {
+      const p = document.createElement('div');
+      p.className = 'note';
+      p.style.marginBottom = '4px';
+      p.textContent = line;
+      pageDiv.appendChild(p);
+    }
+
+    for (const page of sc.ui.pages || []) {
+      const row = document.createElement('div');
+      row.className = 'discover-slicer';
+      const name = document.createElement('span');
+      name.className = 'name';
+      name.textContent = page.name;
+      const meta = document.createElement('span');
+      meta.className = 'meta';
+      const statusBadge = PAGE_STATUS_BADGE[page.status] || PAGE_STATUS_BADGE.different;
+      const badgeEl = document.createElement('span');
+      badgeEl.className = statusBadge.cls;
+      badgeEl.textContent = statusBadge.text;
+      meta.appendChild(document.createTextNode(`${page.rowsExpected} / ${page.rowsActual} rows `));
+      meta.appendChild(badgeEl);
+      row.appendChild(name);
+      row.appendChild(meta);
+      pageDiv.appendChild(row);
+    }
+
+    if ((sc.ui.pagesOnlyInSource || []).length || (sc.ui.pagesOnlyInTarget || []).length) {
+      const p = document.createElement('div');
+      p.className = 'note';
+      p.style.marginTop = '6px';
+      const parts = [];
+      if (sc.ui.pagesOnlyInSource.length) parts.push(`only in Source: ${sc.ui.pagesOnlyInSource.join(', ')}`);
+      if (sc.ui.pagesOnlyInTarget.length) parts.push(`only in Target: ${sc.ui.pagesOnlyInTarget.join(', ')}`);
+      p.textContent = `Pages ${parts.join('; ')}`;
+      pageDiv.appendChild(p);
+    }
+
+    const links = document.createElement('div');
+    links.className = 'parity-file-links';
+    const fileButtons = [
+      ['Open Expected', sc.expectedFile],
+      ['Open Actual', sc.actualFile],
+      ['Open Parity Summary', sc.summaryFile],
+    ];
+    for (const [label, filePath] of fileButtons) {
+      const btn = document.createElement('button');
+      btn.className = 'secondary';
+      btn.type = 'button';
+      btn.textContent = label;
+      btn.addEventListener('click', () => openOutputFile(filePath, label));
+      links.appendChild(btn);
+    }
+    pageDiv.appendChild(links);
+
+    el.appendChild(pageDiv);
+  }
+}
+
 function renderFieldPicker(key, pick) {
   const wrap = document.createElement('div');
   wrap.className = 'discover-page';
@@ -598,19 +759,41 @@ function renderMatchedDiscoverResults(result) {
 
   // Pair up by normalized title - matchDetails.identical already guarantees
   // every source field has exactly one title+hierarchy-ness counterpart in
-  // target and vice versa (see matchDiscoveredFields in
-  // cross-report-match.helpers.ts), so this pairing cannot come up empty on
-  // either side or hit a hierarchy-ness mismatch.
+  // target and vice versa, AND that no title resolves to more than one
+  // distinct field binding on either side (see duplicateTitleConflicts in
+  // matchDiscoveredFields, cross-report-match.helpers.ts) - so this pairing
+  // should never need to choose between more than one candidate. The
+  // grouping-by-title below still defends against it happening anyway: it
+  // is exactly what produced a real bug previously (two "Bewerbungseingang
+  // Cluster" slicers on different fields both getting silently paired to
+  // the SAME target field). If a title ever has more than one distinct
+  // variant on either side here, skip it rather than guess.
+  const sourceGroupsByTitleKey = new Map();
+  for (const g of sourceGroups.values()) {
+    const tk = pageNameKeyJs(g.title);
+    const list = sourceGroupsByTitleKey.get(tk);
+    if (list) list.push(g); else sourceGroupsByTitleKey.set(tk, [g]);
+  }
   const targetGroupsByTitleKey = new Map();
-  for (const g of targetGroups.values()) targetGroupsByTitleKey.set(pageNameKeyJs(g.title), g);
+  for (const g of targetGroups.values()) {
+    const tk = pageNameKeyJs(g.title);
+    const list = targetGroupsByTitleKey.get(tk);
+    if (list) list.push(g); else targetGroupsByTitleKey.set(tk, [g]);
+  }
 
   const container = document.getElementById('discoverResults');
   container.innerHTML = '';
 
   const merged = [];
-  for (const sourceGroup of sourceGroups.values()) {
-    const targetGroup = targetGroupsByTitleKey.get(pageNameKeyJs(sourceGroup.title));
-    if (!targetGroup) continue; // should not happen when result.identical is true
+  for (const [titleKey, srcGroupsForTitle] of sourceGroupsByTitleKey) {
+    const tgtGroupsForTitle = targetGroupsByTitleKey.get(titleKey);
+    if (!tgtGroupsForTitle) continue; // should not happen when result.identical is true
+    if (srcGroupsForTitle.length > 1 || tgtGroupsForTitle.length > 1) {
+      console.warn(`[cygnus] Shared picker: "${srcGroupsForTitle[0].title}" has more than one distinct field binding on at least one side - skipping rather than guessing which pairs with which. This should not happen when identical=true.`);
+      continue;
+    }
+    const sourceGroup = srcGroupsForTitle[0];
+    const targetGroup = tgtGroupsForTitle[0];
     merged.push({ key: fieldKey(sourceGroup.title, sourceGroup.targetLabel), sourceGroup, targetGroup });
   }
 
@@ -664,6 +847,7 @@ function renderSplitDiscoverResults(result) {
   if (d.onlyInSource && d.onlyInSource.length) reasons.push(`only in Source: ${d.onlyInSource.join(', ')}`);
   if (d.onlyInTarget && d.onlyInTarget.length) reasons.push(`only in Target: ${d.onlyInTarget.join(', ')}`);
   if (d.hierarchyMismatch && d.hierarchyMismatch.length) reasons.push(`type differs (flat vs hierarchy): ${d.hierarchyMismatch.join(', ')}`);
+  if (d.duplicateTitleConflicts && d.duplicateTitleConflicts.length) reasons.push(`same title, different field on at least one side: ${d.duplicateTitleConflicts.join(', ')}`);
 
   const banner = document.createElement('div');
   banner.className = 'mismatch-banner';
@@ -704,17 +888,31 @@ function renderSplitDiscoverResults(result) {
 }
 
 document.getElementById('btnDiscover').addEventListener('click', async () => {
+  // Defense in depth: the button is already disabled without a session, but
+  // re-check at click time in case the UI state is ever stale - starting
+  // this run with no session is a guaranteed, confusing failure (see
+  // updateButtonStates's comment for why).
+  await refreshAuthGate();
+  if (!_hasSession) {
+    appendLog('--- Cannot discover filters: no saved login session. Run Authentication first. ---');
+    return;
+  }
+
   const pairName = document.getElementById('pairName').value.trim() || 'Cygnus';
+  const skipGlobalCheck = document.getElementById('discoverSkipGlobalCheck')?.checked === true;
 
   if (bothIdentitiesFilled()) {
     const source = readIdentity('source');
     const target = readIdentity('target');
     appendLog('--- Discovering filters on BOTH reports (comparing source vs target) ---');
+    if (skipGlobalCheck) {
+      appendLog('--- Skipping report-level filter check (uncheck the box above to re-enable) ---');
+    }
     document.getElementById('globalFiltersResult').textContent = '';
     document.getElementById('pageScopeResult').textContent = 'Loading page list…';
     document.getElementById('discoverResults').textContent = 'Discovering source, then target… two fast first-match scans, one after the other.';
 
-    const res = await window.cygnusDesktop.discoverCrossReport(pairName, source, target);
+    const res = await window.cygnusDesktop.discoverCrossReport(pairName, source, target, skipGlobalCheck);
     if (!res.ok) {
       document.getElementById('pageScopeResult').textContent = '';
       document.getElementById('discoverResults').textContent = `Discovery failed: ${res.error}`;
@@ -745,16 +943,16 @@ document.getElementById('btnDiscover').addEventListener('click', async () => {
   }
 
   appendLog(pagesCsv
-    ? `--- Discovering filters: global check + pages [${pagesCsv}] (applies nothing) ---`
-    : '--- Discovering filters: global check only (applies nothing) ---');
+    ? `--- Discovering filters: ${skipGlobalCheck ? 'pages' : 'global check + pages'} [${pagesCsv}] (applies nothing) ---`
+    : `--- Discovering filters: ${skipGlobalCheck ? '(global check skipped)' : 'global check only'} (applies nothing) ---`);
   if (!pagesCsvInput && pagesCsv) {
     appendLog('--- Discovery scope source: selected pages from top page selector ---');
   }
   appendLog(`--- Using ${side === 'target' ? 'Target' : 'Source'} report entered above ---`);
-  document.getElementById('globalFiltersResult').textContent = 'Checking…';
+  document.getElementById('globalFiltersResult').textContent = skipGlobalCheck ? '' : 'Checking…';
   document.getElementById('pageScopeResult').textContent = 'Loading page list…';
   document.getElementById('discoverResults').textContent = pagesCsv ? 'Crawling pages… this can take a while on a page-heavy report.' : '';
-  const res = await window.cygnusDesktop.discoverSlicers(pairName, pagesCsv, identity, side);
+  const res = await window.cygnusDesktop.discoverSlicers(pairName, pagesCsv, identity, side, skipGlobalCheck);
   if (!res.ok) {
     document.getElementById('globalFiltersResult').textContent = '';
     document.getElementById('discoverResults').textContent = `Discovery failed: ${res.error}`;

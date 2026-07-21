@@ -37,12 +37,21 @@
  * Callers that want "position/renaming-tolerant" pass/fail should gate on
  * `dataIdentical`; callers that want a byte-for-byte check should use `identical`.
  *
- * Design constraints (per implementation brief):
- *   - Uses ExcelJS streaming reader only — never document-mode readFile()
- *   - No new npm dependencies: exceljs (already installed) + Node built-in crypto
- *   - Memory-safe: Tier 1 hashes rows and discards them immediately. Tier 2 holds
- *     at most one visual's rows in memory at a time while parsing (not the whole
- *     sheet), matching the memory profile the streaming writer already targets.
+ * Reading strategy: BUFFERED (Workbook.xlsx.readFile), not ExcelJS's streaming
+ * reader. That was the original design (a streaming reader touches less
+ * memory at once), but ExcelJS's streaming WorkbookReader was found to
+ * deadlock indefinitely — never even emitting its first worksheet — on a
+ * real, valid export written by this project's own streaming WRITER (~4MB,
+ * ~4000 rows across 2 sheets; reproduced deterministically, in isolation,
+ * with no pre-seeding and no concurrency involved, so it is not the same
+ * zip-entry-order issue readWorkbookSheetInfo works around below - that one
+ * corrupts sheet NAMES; this one hangs the reader outright). The buffered
+ * reader parses the exact same file correctly in well under a second and,
+ * as a bonus, is read ONCE per file and cached for the whole comparison
+ * instead of re-opening the zip stream from scratch for every sheet - so
+ * this is also strictly faster, not just safer. A 4MB report export fits in
+ * memory without concern; this trade-off would need revisiting only for
+ * exports far larger than anything this pipeline currently produces.
  */
 
 import * as crypto from 'crypto';
@@ -130,43 +139,42 @@ export async function readWorkbookSheetInfo(filePath: string): Promise<SheetInfo
   return sheets;
 }
 
+// ── Buffered workbook access (cached per file for the whole comparison) ──────
+
 /**
- * Creates an ExcelJS streaming reader with its internal workbook model
- * PRE-SEEDED from our own central-directory parse, so _parseWorksheet's
- * name lookup always succeeds regardless of zip entry order (see the long
- * comment above). Touches two internal fields of the pinned exceljs 4.4.0
- * reader (model, workbookRels); the ws.id fallback in isTargetSheet keeps
- * working even if a future exceljs version ignores the seeding.
+ * Loads a workbook fully into memory via ExcelJS's buffered reader (NOT the
+ * streaming one — see the module comment for why) and caches the result per
+ * file path so multiple sheets from the same file only pay the read/parse
+ * cost once. `cache` is expected to be a fresh Map per compareWorkbooks()
+ * call — never module-level — so results can never leak stale content
+ * across independent calls that happen to reuse a file path (e.g. tests
+ * writing to the same temp file more than once).
  */
-function makeSeededReader(filePath: string, sheets: SheetInfo[]): any {
-  const reader = new (ExcelJS as any).stream.xlsx.WorkbookReader(filePath, {
-    sharedStrings: 'cache',
-    hyperlinks:    'ignore',
-    styles:        'ignore',
-    entries:       'emit',
-  });
-  reader.model = {
-    sheets: sheets.map((s, i) => ({
-      id: Number(s.sheetId) || i + 1,
-      name: s.name,
-      rId: s.rId || `rId${s.fileNo}`,
-    })),
-  };
-  reader.workbookRels = sheets.map(s => ({
-    Id:     s.rId || `rId${s.fileNo}`,
-    Target: `worksheets/sheet${s.fileNo}.xml`,
-  }));
-  return reader;
+function getBufferedWorkbook(filePath: string, cache: Map<string, Promise<ExcelJS.Workbook>>): Promise<ExcelJS.Workbook> {
+  let p = cache.get(filePath);
+  if (!p) {
+    p = (async () => {
+      const wb = new ExcelJS.Workbook();
+      await wb.xlsx.readFile(filePath);
+      return wb;
+    })();
+    cache.set(filePath, p);
+  }
+  return p;
 }
 
-/** True when the emitted worksheet is the one described by `target`. */
-function isTargetSheet(ws: any, target: SheetInfo, realNames: Set<string>): boolean {
-  const wsName = typeof ws.name === 'string' ? ws.name : '';
-  // A name we recognise from workbook.xml is authoritative; otherwise the
-  // reader fell back to its default ("Sheet<fileNo>") and the id — which in
-  // that fallback IS the file number — identifies the sheet instead.
-  if (realNames.has(wsName)) return wsName === target.name;
-  return String(ws.id) === String(target.fileNo);
+/**
+ * Finds the worksheet described by `target` inside an already-loaded
+ * (buffered) workbook. The buffered reader resolves worksheet names
+ * directly from workbook.xml with full random access, so — unlike the old
+ * streaming path — it never falls back to a default "Sheet1"/"Sheet2" name
+ * and this lookup can simply match by name; the sheetId fallback below is
+ * belt-and-braces for the (unobserved, in buffered mode) case of a name
+ * mismatch, e.g. from a future exceljs version.
+ */
+function findWorksheet(wb: ExcelJS.Workbook, target: SheetInfo): ExcelJS.Worksheet | undefined {
+  return wb.worksheets.find(ws => ws.name === target.name)
+    ?? wb.worksheets.find(ws => String(ws.id) === String(target.sheetId) || String(ws.id) === String(target.fileNo));
 }
 
 /** Canonical pairing key: sheet names differing only by case/edge-whitespace
@@ -352,17 +360,16 @@ interface SheetHashResult {
 }
 
 /**
- * One retry for a failed streaming read. The failure mode this covers was
- * observed in production: the ExcelJS reader ending its iteration early
- * without emitting every sheet. A sheet not being emitted now THROWS (see the
- * `found` checks in the readers below) instead of silently returning an empty
- * result that would then be "compared" as if it were real data.
+ * One retry for a failed read (transient I/O hiccup on the underlying file).
+ * A sheet not being found now THROWS (see sheetNotEmitted) instead of
+ * silently returning an empty result that would then be "compared" as if it
+ * were real data.
  */
 async function withSheetRetry<T>(filePath: string, target: SheetInfo, read: () => Promise<T>): Promise<T> {
   try {
     return await read();
   } catch (e) {
-    console.warn(`[excel-compare] Re-reading "${target.name}" from ${path.basename(filePath)} after a failed streaming read: ${(e as Error).message}`);
+    console.warn(`[excel-compare] Re-reading "${target.name}" from ${path.basename(filePath)} after a failed read: ${(e as Error).message}`);
     return await read();
   }
 }
@@ -370,33 +377,27 @@ async function withSheetRetry<T>(filePath: string, target: SheetInfo, read: () =
 function sheetNotEmitted(filePath: string, target: SheetInfo): Error {
   return new Error(
     `Sheet "${target.name}" (worksheets/sheet${target.fileNo}.xml) exists in ${path.basename(filePath)}'s ` +
-    `workbook.xml but was never emitted by the streaming reader — the file may be corrupted or the read ` +
+    `workbook.xml but was not found when the file was loaded — the file may be corrupted or the read ` +
     `was interrupted. Refusing to treat it as empty.`,
   );
 }
 
-async function hashSheetOrdered(filePath: string, target: SheetInfo, allSheets: SheetInfo[]): Promise<SheetHashResult> {
-  const realNames = new Set(allSheets.map(s => s.name));
+async function hashSheetOrdered(
+  filePath: string, target: SheetInfo, cache: Map<string, Promise<ExcelJS.Workbook>>,
+): Promise<SheetHashResult> {
   return withSheetRetry(filePath, target, async () => {
+    const wb = await getBufferedWorkbook(filePath, cache);
+    const ws = findWorksheet(wb, target);
+    if (!ws) throw sheetNotEmitted(filePath, target);
+
     let orderedHash = '';
     let rowCount    = 0;
-    let found       = false;
-
-    const reader = makeSeededReader(filePath, allSheets);
-    for await (const ws of reader) {
-      if (!isTargetSheet(ws, target, realNames)) {
-        for await (const _ of ws) { /* drain so the stream doesn't stall */ }
-        continue;
-      }
-      found = true;
-      for await (const row of ws) {
-        const cells = normalizeRow(row as ExcelJS.Row);
-        if (cells.every(c => c === '')) continue; // skip fully-blank spacer rows
-        rowCount++;
-        orderedHash = hashRunning(orderedHash, hashRow(cells));
-      }
-    }
-    if (!found) throw sheetNotEmitted(filePath, target);
+    ws.eachRow({ includeEmpty: true }, (row) => {
+      const cells = normalizeRow(row);
+      if (cells.every(c => c === '')) return; // skip fully-blank spacer rows
+      rowCount++;
+      orderedHash = hashRunning(orderedHash, hashRow(cells));
+    });
     return { orderedHash, rowCount };
   });
 }
@@ -421,44 +422,39 @@ interface VisualBlockRaw {
   rows:    string[][];
 }
 
-async function streamSheetBlocks(filePath: string, target: SheetInfo, allSheets: SheetInfo[]): Promise<VisualBlockRaw[]> {
-  const realNames = new Set(allSheets.map(s => s.name));
+async function streamSheetBlocks(
+  filePath: string, target: SheetInfo, cache: Map<string, Promise<ExcelJS.Workbook>>,
+): Promise<VisualBlockRaw[]> {
   return withSheetRetry(filePath, target, async () => {
+    const wb = await getBufferedWorkbook(filePath, cache);
+    const ws = findWorksheet(wb, target);
+    if (!ws) throw sheetNotEmitted(filePath, target);
+
     const blocks: VisualBlockRaw[] = [];
     let current: VisualBlockRaw | null = null;
     let sawHeaderForCurrent = false;
-    let found = false;
 
-    const reader = makeSeededReader(filePath, allSheets);
-    for await (const ws of reader) {
-      if (!isTargetSheet(ws, target, realNames)) {
-        for await (const _ of ws) { /* drain */ }
-        continue;
+    ws.eachRow({ includeEmpty: true }, (row) => {
+      const cells = normalizeRow(row);
+      const isBlank = cells.every(c => c === '');
+      const marker  = !isBlank ? cells[0].match(VISUAL_MARKER_RE) : null;
+
+      if (marker) {
+        if (current) blocks.push(current);
+        current = { title: marker[1].trim(), type: marker[2].trim(), headers: [], rows: [] };
+        sawHeaderForCurrent = false;
+        return;
       }
-      found = true;
-      for await (const row of ws) {
-        const cells = normalizeRow(row as ExcelJS.Row);
-        const isBlank = cells.every(c => c === '');
-        const marker  = !isBlank ? cells[0].match(VISUAL_MARKER_RE) : null;
+      if (isBlank) return;       // spacer row between visuals
+      if (!current) return;      // defensive: content before any marker row
 
-        if (marker) {
-          if (current) blocks.push(current);
-          current = { title: marker[1].trim(), type: marker[2].trim(), headers: [], rows: [] };
-          sawHeaderForCurrent = false;
-          continue;
-        }
-        if (isBlank) continue;       // spacer row between visuals
-        if (!current) continue;      // defensive: content before any marker row
-
-        if (!sawHeaderForCurrent) {
-          current.headers = cells;
-          sawHeaderForCurrent = true;
-        } else {
-          current.rows.push(cells);
-        }
+      if (!sawHeaderForCurrent) {
+        current.headers = cells;
+        sawHeaderForCurrent = true;
+      } else {
+        current.rows.push(cells);
       }
-    }
-    if (!found) throw sheetNotEmitted(filePath, target);
+    });
     if (current) blocks.push(current);
     return blocks;
   });
@@ -726,25 +722,20 @@ function matchVisualBlocks(expectedBlocks: VisualBlockRaw[], actualBlocks: Visua
 // non-Cygnus-format sheet still gets a real comparison instead of a vacuous
 // "nothing parsed, so call it identical".
 
-async function streamPlainRows(filePath: string, target: SheetInfo, allSheets: SheetInfo[]): Promise<string[][]> {
-  const realNames = new Set(allSheets.map(s => s.name));
+async function streamPlainRows(
+  filePath: string, target: SheetInfo, cache: Map<string, Promise<ExcelJS.Workbook>>,
+): Promise<string[][]> {
   return withSheetRetry(filePath, target, async () => {
+    const wb = await getBufferedWorkbook(filePath, cache);
+    const ws = findWorksheet(wb, target);
+    if (!ws) throw sheetNotEmitted(filePath, target);
+
     const rows: string[][] = [];
-    let found = false;
-    const reader = makeSeededReader(filePath, allSheets);
-    for await (const ws of reader) {
-      if (!isTargetSheet(ws, target, realNames)) {
-        for await (const _ of ws) { /* drain */ }
-        continue;
-      }
-      found = true;
-      for await (const row of ws) {
-        const cells = normalizeRow(row as ExcelJS.Row);
-        if (cells.every(c => c === '')) continue;
-        rows.push(cells);
-      }
-    }
-    if (!found) throw sheetNotEmitted(filePath, target);
+    ws.eachRow({ includeEmpty: true }, (row) => {
+      const cells = normalizeRow(row);
+      if (cells.every(c => c === '')) return;
+      rows.push(cells);
+    });
     return rows;
   });
 }
@@ -752,11 +743,11 @@ async function streamPlainRows(filePath: string, target: SheetInfo, allSheets: S
 async function comparePlainSheet(
   fileExpected: string, fileActual: string,
   expSheet: SheetInfo, actSheet: SheetInfo,
-  expAll: SheetInfo[], actAll: SheetInfo[],
+  cache: Map<string, Promise<ExcelJS.Workbook>>,
 ): Promise<VisualBlockDiff[]> {
   const [rowsExp, rowsAct] = await Promise.all([
-    streamPlainRows(fileExpected, expSheet, expAll),
-    streamPlainRows(fileActual,   actSheet, actAll),
+    streamPlainRows(fileExpected, expSheet, cache),
+    streamPlainRows(fileActual,   actSheet, cache),
   ]);
 
   const expSig = blockDataSignature(rowsExp);
@@ -805,6 +796,11 @@ export async function compareWorkbooks(
   const expSheets = await readWorkbookSheetInfo(fileExpected);
   const actSheets = await readWorkbookSheetInfo(fileActual);
 
+  // Fresh per call - see getBufferedWorkbook's doc comment for why this must
+  // never be module-level. Both files get read/parsed at most ONCE total,
+  // no matter how many sheets are compared.
+  const workbookCache = new Map<string, Promise<ExcelJS.Workbook>>();
+
   // Pair case-insensitively and whitespace-trimmed: "…- Cluster" vs
   // "…- cluster" (or a trailing space) between a source and a migrated
   // report is the same page, not a missing sheet. Excel forbids two sheets
@@ -837,8 +833,8 @@ export async function compareWorkbooks(
   for (const { exp, act } of commonPairs) {
     const sheetName = exp.name;
     const [expHash, actHash] = await Promise.all([
-      hashSheetOrdered(fileExpected, exp, expSheets),
-      hashSheetOrdered(fileActual,   act, actSheets),
+      hashSheetOrdered(fileExpected, exp, workbookCache),
+      hashSheetOrdered(fileActual,   act, workbookCache),
     ]);
 
     if (expHash.orderedHash === actHash.orderedHash) {
@@ -856,8 +852,8 @@ export async function compareWorkbooks(
 
     // Tier 2: visual-block-aware detailed comparison.
     const [expBlocks, actBlocks] = await Promise.all([
-      streamSheetBlocks(fileExpected, exp, expSheets),
-      streamSheetBlocks(fileActual,   act, actSheets),
+      streamSheetBlocks(fileExpected, exp, workbookCache),
+      streamSheetBlocks(fileActual,   act, workbookCache),
     ]);
 
     let visuals: VisualBlockDiff[];
@@ -869,7 +865,7 @@ export async function compareWorkbooks(
       // way execution reaches here), so falling through to an empty visuals
       // list would be a vacuous truth — "nothing to compare" is not the same
       // as "everything matches". Compare the raw rows directly instead.
-      visuals = await comparePlainSheet(fileExpected, fileActual, exp, act, expSheets, actSheets);
+      visuals = await comparePlainSheet(fileExpected, fileActual, exp, act, workbookCache);
     } else {
       visuals = matchVisualBlocks(expBlocks, actBlocks);
     }

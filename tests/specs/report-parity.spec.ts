@@ -34,6 +34,7 @@ import {
 import {
   exportReportToWorkbook,
   writeParitySummary,
+  summarizeForUi,
   diffPageSets,
   pageNameKey,
   type ReportExportResult,
@@ -429,6 +430,15 @@ test('Report Parity — Import mode vs Direct Lake data validation', async ({ pa
 
   // Aggregate verdict across all scenarios for the final annotation.
   const scenarioResults: Array<{ name: string; passed: boolean; differingSheets: number; summary: string }> = [];
+  // Parallel accumulator for the desktop app's in-page summary (parity-result.json,
+  // written after the loop below) - kept separate from scenarioResults above
+  // since that one only feeds the console/test-annotation verdict and this one
+  // needs each scenario's actual resolved file paths (they differ per scenario
+  // once a named filter scenario is in play - see pathsFor() below).
+  const uiScenarioResults: Array<{
+    name: string; expectedFile: string; actualFile: string; summaryFile: string;
+    ui: ReturnType<typeof summarizeForUi>;
+  }> = [];
 
   for (const sc of scenarioRuns) {
     const P = pathsFor(sc);
@@ -581,6 +591,14 @@ test('Report Parity — Import mode vs Direct Lake data validation', async ({ pa
       P.summary,
     );
 
+    uiScenarioResults.push({
+      name: sc === UNFILTERED ? '(unfiltered)' : sc.name,
+      expectedFile: P.expected,
+      actualFile: P.actual,
+      summaryFile: P.summary,
+      ui: summarizeForUi(diff, caveats, passed, differingSheets),
+    });
+
     if (caveats.length > 0) {
       console.log('\n  ⚠⚠⚠ COMPARISON CAVEATS — this run is NOT a valid like-for-like comparison:');
       for (const c of caveats) console.log(`    - ${c}`);
@@ -639,6 +657,27 @@ test('Report Parity — Import mode vs Direct Lake data validation', async ({ pa
         ? 'Source and target report data match.'
         : `${r.differingSheets} page(s) differ. See ${r.summary}`,
     });
+  }
+
+  // Machine-readable summary for the desktop app's in-page results view (see
+  // app-desktop/main.js's runParity(), which reads this back the same way
+  // runDiscoverSlicers() reads discovered-slicers.json). Best-effort: a bug
+  // writing this must never break the xlsx-based flow that already works,
+  // so failures here are logged, not thrown.
+  try {
+    fs.writeFileSync(
+      path.join(OUT_DIR, 'parity-result.json'),
+      JSON.stringify({
+        pairName: pair.name,
+        mode,
+        runAt: new Date().toISOString(),
+        allPassed,
+        scenarios: uiScenarioResults,
+      }, null, 2),
+      'utf8',
+    );
+  } catch (e) {
+    console.warn(`[report-parity] Could not write parity-result.json (non-fatal): ${(e as Error).message}`);
   }
 
   if (process.env['FAIL_ON_PARITY_DIFF'] === '1') {
