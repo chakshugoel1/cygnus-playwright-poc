@@ -242,12 +242,12 @@ document.getElementById('btnParity').addEventListener('click', async () => {
   if (cfg.lenientTextCompare) {
     appendLog('--- Case insensitive compare enabled (case/space/underscore/hyphen differences ignored) ---');
   }
+  document.getElementById('parityResults').innerHTML = '';
 
-  if (authStatus.hasSession) {
-    await window.cygnusDesktop.runParity(cfg);
-  } else {
-    await window.cygnusDesktop.runSetupAndParity(cfg);
-  }
+  const res = authStatus.hasSession
+    ? await window.cygnusDesktop.runParity(cfg)
+    : await window.cygnusDesktop.runSetupAndParity(cfg);
+  if (res.ok) renderParityResults(res.result);
   await refreshAuthGate();
 });
 
@@ -259,7 +259,9 @@ document.getElementById('btnBoth').addEventListener('click', async () => {
     return;
   }
   appendLog('--- Running setup + parity ---');
-  await window.cygnusDesktop.runSetupAndParity(cfg);
+  document.getElementById('parityResults').innerHTML = '';
+  const res = await window.cygnusDesktop.runSetupAndParity(cfg);
+  if (res.ok) renderParityResults(res.result);
   await refreshAuthGate();
 });
 
@@ -522,6 +524,129 @@ function renderGlobalFilters(globalFilters) {
     pageDiv.appendChild(row);
   }
   el.appendChild(pageDiv);
+}
+
+// ── Parity results (in-page summary of parity-result.json) ──────────────────
+//
+// A more detailed, always-visible alternative to opening parity-summary.xlsx
+// by hand - NOT a replacement for it. Full per-visual detail (sample rows,
+// etc.) stays exclusive to the xlsx; this view is page-level, plus a link to
+// open each of the three generated files for anyone who wants to go deeper.
+
+const VERDICT_BADGE = {
+  pass:          { cls: 'badge lg',        text: '✅ PASS' },
+  fail:          { cls: 'badge lg fail',   text: '❌ FAIL' },
+  not_comparable: { cls: 'badge lg review', text: '⚠️ NOT COMPARABLE' },
+};
+
+const PAGE_STATUS_BADGE = {
+  'identical':       { cls: 'badge',        text: 'Identical' },
+  'header-only':     { cls: 'badge',        text: 'Labels differ only' },
+  'different':       { cls: 'badge fail',   text: 'Different' },
+  'only-in-source':  { cls: 'badge review', text: 'Missing in Target' },
+  'only-in-target':  { cls: 'badge review', text: 'Only in Target' },
+};
+
+async function openOutputFile(filePath, label) {
+  const res = await window.cygnusDesktop.openOutputFile(filePath);
+  if (!res.ok) appendLog(`--- Could not open ${label}: ${res.error} ---`);
+}
+
+function renderParityResults(result) {
+  const el = document.getElementById('parityResults');
+  el.innerHTML = '';
+
+  if (!result) {
+    el.innerHTML = '<div class="note">No parity summary to show yet — either this was a source-only run (nothing was compared), or the run did not get far enough to produce one. Check the log above.</div>';
+    return;
+  }
+
+  const heading = document.createElement('div');
+  heading.className = 'section-title';
+  heading.style.marginTop = 'var(--space-3)';
+  heading.textContent = 'Parity results';
+  el.appendChild(heading);
+
+  for (const sc of result.scenarios || []) {
+    const pageDiv = document.createElement('div');
+    pageDiv.className = 'discover-page';
+
+    const h3 = document.createElement('h3');
+    h3.textContent = sc.name && sc.name !== '(unfiltered)' ? `Scenario: ${sc.name}` : 'Result';
+    pageDiv.appendChild(h3);
+
+    const verdictRow = document.createElement('div');
+    verdictRow.className = 'parity-verdict';
+    const verdict = VERDICT_BADGE[sc.ui.verdict] || VERDICT_BADGE.fail;
+    const verdictBadge = document.createElement('span');
+    verdictBadge.className = verdict.cls;
+    verdictBadge.textContent = verdict.text;
+    verdictRow.appendChild(verdictBadge);
+    if (sc.ui.differingSheets > 0) {
+      const note = document.createElement('span');
+      note.className = 'note';
+      note.textContent = `${sc.ui.differingSheets} page(s) with real differences`;
+      verdictRow.appendChild(note);
+    }
+    pageDiv.appendChild(verdictRow);
+
+    for (const line of sc.ui.narrative || []) {
+      const p = document.createElement('div');
+      p.className = 'note';
+      p.style.marginBottom = '4px';
+      p.textContent = line;
+      pageDiv.appendChild(p);
+    }
+
+    for (const page of sc.ui.pages || []) {
+      const row = document.createElement('div');
+      row.className = 'discover-slicer';
+      const name = document.createElement('span');
+      name.className = 'name';
+      name.textContent = page.name;
+      const meta = document.createElement('span');
+      meta.className = 'meta';
+      const statusBadge = PAGE_STATUS_BADGE[page.status] || PAGE_STATUS_BADGE.different;
+      const badgeEl = document.createElement('span');
+      badgeEl.className = statusBadge.cls;
+      badgeEl.textContent = statusBadge.text;
+      meta.appendChild(document.createTextNode(`${page.rowsExpected} / ${page.rowsActual} rows `));
+      meta.appendChild(badgeEl);
+      row.appendChild(name);
+      row.appendChild(meta);
+      pageDiv.appendChild(row);
+    }
+
+    if ((sc.ui.pagesOnlyInSource || []).length || (sc.ui.pagesOnlyInTarget || []).length) {
+      const p = document.createElement('div');
+      p.className = 'note';
+      p.style.marginTop = '6px';
+      const parts = [];
+      if (sc.ui.pagesOnlyInSource.length) parts.push(`only in Source: ${sc.ui.pagesOnlyInSource.join(', ')}`);
+      if (sc.ui.pagesOnlyInTarget.length) parts.push(`only in Target: ${sc.ui.pagesOnlyInTarget.join(', ')}`);
+      p.textContent = `Pages ${parts.join('; ')}`;
+      pageDiv.appendChild(p);
+    }
+
+    const links = document.createElement('div');
+    links.className = 'parity-file-links';
+    const fileButtons = [
+      ['Open Expected', sc.expectedFile],
+      ['Open Actual', sc.actualFile],
+      ['Open Parity Summary', sc.summaryFile],
+    ];
+    for (const [label, filePath] of fileButtons) {
+      const btn = document.createElement('button');
+      btn.className = 'secondary';
+      btn.type = 'button';
+      btn.textContent = label;
+      btn.addEventListener('click', () => openOutputFile(filePath, label));
+      links.appendChild(btn);
+    }
+    pageDiv.appendChild(links);
+
+    el.appendChild(pageDiv);
+  }
 }
 
 function renderFieldPicker(key, pick) {

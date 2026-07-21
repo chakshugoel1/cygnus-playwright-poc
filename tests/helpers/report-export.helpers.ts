@@ -26,7 +26,7 @@ import {
   type ReportPage,
   type VisualExport,
 } from './harness.helpers';
-import type { WorkbookDiffSummary, VisualBlockDiff } from './excel-compare.helpers';
+import type { WorkbookDiffSummary, VisualBlockDiff, SheetDiffSummary } from './excel-compare.helpers';
 
 // Visual types that carry no tabular data — never written or compared.
 const SKIP_TYPES = new Set(['image', 'shape', 'textbox', 'actionButton']);
@@ -522,7 +522,7 @@ function visualDataMatches(status: VisualBlockDiff['status']): boolean {
 // can be scanned (or filtered) at a glance, and gives the row itself a light
 // background tint (full-row, not just the Status cell) so a critical row is
 // visually unmistakable even scrolling past it quickly.
-type Severity = 'safe' | 'review' | 'critical';
+export type Severity = 'safe' | 'review' | 'critical';
 
 const VISUAL_SEVERITY: Record<VisualBlockDiff['status'], Severity> = {
   'identical':        'safe',
@@ -663,6 +663,105 @@ export function buildAnalysisNarrative(
   }
 
   return lines;
+}
+
+// ── Lightweight UI summary (for the desktop app, NOT the xlsx) ───────────────
+//
+// A trimmed, JSON-serializable view of a comparison result, meant for the
+// Electron app to render an in-page summary right after a run finishes,
+// instead of the user having to open parity-summary.xlsx just to see
+// pass/fail. Deliberately excludes VisualBlockDiff's sampleOnlyInExpected/
+// sampleOnlyInActual arrays (up to SAMPLE_SIZE=800 rows each, per visual) —
+// those stay exclusive to the xlsx "Differences" sheet. This is a summary
+// OF the xlsx, not a replacement for it; fields are picked explicitly
+// below, never spread, so a future VisualBlockDiff field never leaks a
+// large payload into this JSON by accident.
+
+export interface ParityUiVisual {
+  title: string;
+  type: string;
+  severity: Severity;
+  statusLabel: string;
+  note?: string;
+}
+
+export interface ParityUiPage {
+  name: string;
+  status: 'identical' | 'header-only' | 'different' | 'only-in-source' | 'only-in-target';
+  rowsExpected: number;
+  rowsActual: number;
+  headerDiffCount: number;
+  structuralDiffCount: number;
+  visuals: ParityUiVisual[];
+}
+
+export interface ParityUiSummary {
+  /** Same three-way distinction the xlsx verdict cell shows - a plain
+   *  boolean can't tell "genuine fail" from "not a valid comparison". */
+  verdict: 'pass' | 'fail' | 'not_comparable';
+  passed: boolean;
+  differingSheets: number;
+  caveats: string[];
+  narrative: string[];
+  stats: AnalysisStats;
+  pagesOnlyInSource: string[];
+  pagesOnlyInTarget: string[];
+  pages: ParityUiPage[];
+}
+
+/** Per-page status - mirrors the exact if/else chain used for the "Page
+ *  Comparison" xlsx sheet's Status column, so the two never drift apart. */
+function pageUiStatus(s: SheetDiffSummary): ParityUiPage['status'] {
+  if (s.inExpected && !s.inActual) return 'only-in-source';
+  if (!s.inExpected && s.inActual) return 'only-in-target';
+  if (s.identical) return 'identical';
+  if (s.dataIdentical) return 'header-only';
+  return 'different';
+}
+
+/**
+ * Builds the lightweight UI summary described above. `passed`/`differingSheets`
+ * should be exactly what writeParitySummary() just returned for this same
+ * `diff`, so the two representations of the same run can never disagree.
+ */
+export function summarizeForUi(
+  diff: WorkbookDiffSummary,
+  caveats: string[],
+  passed: boolean,
+  differingSheets: number,
+): ParityUiSummary {
+  const stats = computeAnalysisStats(diff);
+  const narrative = buildAnalysisNarrative(diff, stats, passed, caveats);
+
+  const pages: ParityUiPage[] = diff.sheets
+    .filter(s => s.inExpected && s.inActual) // sheetsOnlyInExpected/Actual already cover the other two cases below
+    .map(s => ({
+      name: s.sheet,
+      status: pageUiStatus(s),
+      rowsExpected: s.rowsExpected,
+      rowsActual: s.rowsActual,
+      headerDiffCount: s.headerDiffCount,
+      structuralDiffCount: s.structuralDiffCount,
+      visuals: s.visuals.map(v => ({
+        title: v.title,
+        type: v.type,
+        severity: VISUAL_SEVERITY[v.status],
+        statusLabel: VISUAL_STATUS_LABEL[v.status],
+        note: v.note,
+      })),
+    }));
+
+  return {
+    verdict: caveats.length > 0 ? 'not_comparable' : (passed ? 'pass' : 'fail'),
+    passed,
+    differingSheets,
+    caveats,
+    narrative,
+    stats,
+    pagesOnlyInSource: diff.sheetsOnlyInExpected,
+    pagesOnlyInTarget: diff.sheetsOnlyInActual,
+    pages,
+  };
 }
 
 /**

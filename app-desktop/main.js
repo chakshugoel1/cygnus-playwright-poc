@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain } = require('electron');
+const { app, BrowserWindow, ipcMain, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -322,6 +322,22 @@ async function runParity(config) {
 
   emitLog('[desktop-runner] Starting parity via npm run parity');
   await runScript('parity', extraEnv, 'parity');
+
+  // Read back the in-page summary the test just wrote (see
+  // report-parity.spec.ts's parity-result.json write, mirroring how
+  // discovered-slicers.json already gets read back below). Unlike
+  // discovery, a MISSING file here is an expected, non-error state - a
+  // source-only run (MODE=source) legitimately produces no comparison, so
+  // nothing to summarize - not a broken run.
+  const resolvedPairName = (config.pairName || 'Cygnus').trim();
+  const resultPath = path.join(WORKSPACE_ROOT, 'playwright-report-parity', resolvedPairName, 'parity-result.json');
+  if (!fs.existsSync(resultPath)) return null;
+  try {
+    return JSON.parse(fs.readFileSync(resultPath, 'utf8'));
+  } catch (e) {
+    emitLog(`[desktop-runner] Could not read parity-result.json (non-fatal): ${e.message}`);
+    return null;
+  }
 }
 
 async function runDiscoverSlicers(pairName, pagesCsv, identity, side, skipGlobalCheck) {
@@ -499,8 +515,8 @@ ipcMain.handle('run-setup', async () => {
 ipcMain.handle('run-parity', async (_event, config) => {
   if (!beginFlow()) return { ok: false, error: BUSY_ERROR };
   try {
-    await runParity(config);
-    return { ok: true };
+    const result = await runParity(config);
+    return { ok: true, result };
   } catch (e) {
     emitLog(`[desktop-runner] Parity error: ${e.message}`);
     return { ok: false, error: e.message };
@@ -539,13 +555,49 @@ ipcMain.handle('run-setup-and-parity', async (_event, config) => {
   if (!beginFlow()) return { ok: false, error: BUSY_ERROR };
   try {
     await runSetup();
-    await runParity(config);
-    return { ok: true };
+    const result = await runParity(config);
+    return { ok: true, result };
   } catch (e) {
     emitLog(`[desktop-runner] Combined flow error: ${e.message}`);
     return { ok: false, error: e.message };
   } finally {
     endFlow();
+  }
+});
+
+// Confines a renderer-supplied path to WORKSPACE_ROOT/playwright-report-parity
+// before handing it to shell.* below - filePath crosses the renderer/main
+// boundary (it's whatever the UI has stored from a parity-result.json
+// response), so it must never be trusted as-is. The trailing separator on
+// `base` stops a sibling-directory bypass like "...-parity-evil/x".
+const OUTPUT_ROOT = path.join(WORKSPACE_ROOT, 'playwright-report-parity') + path.sep;
+
+function confineToOutputRoot(filePath) {
+  const resolved = path.resolve(String(filePath || ''));
+  if (!resolved.startsWith(OUTPUT_ROOT)) {
+    throw new Error(`Refusing to open a path outside the report output folder: ${filePath}`);
+  }
+  return resolved;
+}
+
+ipcMain.handle('open-output-file', async (_event, filePath) => {
+  try {
+    const resolved = confineToOutputRoot(filePath);
+    const err = await shell.openPath(resolved);
+    if (err) return { ok: false, error: err };
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+
+ipcMain.handle('show-output-in-folder', async (_event, filePath) => {
+  try {
+    const resolved = confineToOutputRoot(filePath);
+    shell.showItemInFolder(resolved);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message };
   }
 });
 
