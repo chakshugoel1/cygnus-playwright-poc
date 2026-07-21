@@ -100,15 +100,28 @@ export interface ReportExportResult {
  * Migrated reports and cross-report filter titles drift in exactly these
  * ways while still meaning the same thing: trailing/leading whitespace
  * ("Vertragsversand " vs "Vertragsversand"), case ("- Cluster" vs
- * "- cluster"), and separator style ("Recruiting_Weg" vs "Recruiting Weg"
+ * "- cluster"), separator style ("Recruiting_Weg" vs "Recruiting Weg"
  * vs "RecruitingWeg" — separators are stripped entirely, not just
- * normalized to one style, so "a_bc" and "abc" compare equal). Shared by
- * page-name matching (this file) and cross-report filter-title matching
- * (cross-report-match.helpers.ts) — one rule, used everywhere names from
- * two different reports need to be compared.
+ * normalized to one style, so "a_bc" and "abc" compare equal), and accents
+ * ("Commodité" vs "Commodite" — observed in production: the exact same page
+ * lost its accent during migration and was treated as two different pages).
+ * Shared by page-name matching (this file) and cross-report filter-title
+ * matching (cross-report-match.helpers.ts) — one rule, used everywhere names
+ * from two different reports need to be compared.
  */
+// Built from explicit char codes (never a literal combining-mark character in
+// this file) - Unicode combining diacritical marks, U+0300 to U+036F. After
+// name.normalize('NFD') splits an accented letter into base + mark (e-acute
+// -> "e" + U+0301), stripping this range removes the mark and leaves the
+// plain base letter.
+const COMBINING_DIACRITICS_RE = new RegExp(
+  '[' + String.fromCharCode(0x0300) + '-' + String.fromCharCode(0x036f) + ']', 'g',
+);
+
 export function pageNameKey(name: string): string {
-  return name.trim().toLowerCase().replace(/[\s_-]+/g, '');
+  return name
+    .normalize('NFD').replace(COMBINING_DIACRITICS_RE, '') // strip accents: e-acute -> e, etc.
+    .trim().toLowerCase().replace(/[\s_-]+/g, '');
 }
 
 /**

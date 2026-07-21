@@ -177,11 +177,22 @@ function findWorksheet(wb: ExcelJS.Workbook, target: SheetInfo): ExcelJS.Workshe
     ?? wb.worksheets.find(ws => String(ws.id) === String(target.sheetId) || String(ws.id) === String(target.fileNo));
 }
 
+// Built from explicit char codes (never a literal combining-mark character in
+// this file) - Unicode combining diacritical marks, U+0300 to U+036F. Mirrors
+// the same range used by pageNameKey in report-export.helpers.ts; kept as its
+// own local copy rather than imported, to avoid a circular module import
+// (that file already imports types from this one).
+const COMBINING_DIACRITICS_RE = new RegExp(
+  '[' + String.fromCharCode(0x0300) + '-' + String.fromCharCode(0x036f) + ']', 'g',
+);
+
 /** Canonical pairing key: sheet names differing only by case/edge-whitespace
  *  (e.g. "…- Cluster" vs "…- cluster" between a source and a migrated report)
- *  refer to the same page and must pair up. */
+ *  or accents (e.g. "Commodité" vs "Commodite" - observed in production,
+ *  the exact same page lost its accent during migration) refer to the same
+ *  page and must pair up. */
 function sheetKey(name: string): string {
-  return name.trim().toLowerCase();
+  return name.normalize('NFD').replace(COMBINING_DIACRITICS_RE, '').trim().toLowerCase();
 }
 
 // ── Public types ─────────────────────────────────────────────────────────────
@@ -334,12 +345,24 @@ function normalizeCell(value: ExcelJS.CellValue): string {
 
 /**
  * Normalises a row's cell value array into a plain string array.
- * row.values is 1-indexed in ExcelJS (index 0 is undefined).
+ * row.values is 1-indexed in ExcelJS (index 0 is undefined). Exported for
+ * direct unit testing of the sparse-row handling (see the comment inside).
  */
-function normalizeRow(row: ExcelJS.Row): string[] {
+export function normalizeRow(row: ExcelJS.Row): string[] {
   const vals = row.values as ExcelJS.CellValue[];
-  // slice(1) to drop the 0-index placeholder
-  return (vals || []).slice(1).map(normalizeCell);
+  // Array.from (not a direct .slice/.map on `vals`) is required here:
+  // ExcelJS's row.values is column-position-indexed and can be SPARSE - a
+  // row with no cell at all in some column leaves a genuine hole, not an
+  // explicit undefined. Array.prototype.map SKIPS holes (never calls its
+  // callback for them), so normalizeCell never ran for that position and
+  // the hole passed straight through as `undefined` instead of becoming
+  // '' like every other blank cell - crashing the first thing downstream
+  // that assumed every cell is always a string (observed in production on
+  // a 24k-row table, the first row large enough to expose the gap).
+  // Array.from reads by index up to .length, which materializes an
+  // explicit `undefined` at each hole - normalizeCell already handles
+  // that correctly, it just never got the chance to run before.
+  return Array.from(vals || []).slice(1).map(normalizeCell);
 }
 
 // ── Hashing ───────────────────────────────────────────────────────────────────
