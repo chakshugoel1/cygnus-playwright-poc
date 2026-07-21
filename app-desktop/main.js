@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain } = require('electron');
+const { app, BrowserWindow, ipcMain, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -25,38 +25,55 @@ function pageNameKeyJs(name) {
   return String(name || '').trim().toLowerCase().replace(/[\s_-]+/g, '');
 }
 
+// Mirrors cross-report-match.helpers.ts's matchDiscoveredFields exactly
+// (plain JS, no TS compilation available here - see the .ts version for the
+// full reasoning). Groups by title into ALL distinct (title, binding)
+// variants rather than keeping just the first-seen slicer: a title shared
+// by slicers bound to DIFFERENT fields (observed in production) can never
+// be safely auto-paired, even when both sides have the same variant count.
+function variantKeyJs(f) {
+  return String(f.targetLabel || '');
+}
+
+function groupByTitleJs(fields) {
+  const byTitle = new Map();
+  for (const f of fields || []) {
+    const key = pageNameKeyJs(f.title);
+    let variants = byTitle.get(key);
+    if (!variants) { variants = []; byTitle.set(key, variants); }
+    if (!variants.some(v => variantKeyJs(v) === variantKeyJs(f))) variants.push(f);
+  }
+  return byTitle;
+}
+
 function matchDiscoveredFieldsJs(sourceFields, targetFields) {
-  const bySourceKey = new Map();
-  for (const f of sourceFields || []) {
-    const key = pageNameKeyJs(f.title);
-    if (!bySourceKey.has(key)) bySourceKey.set(key, f);
-  }
-  const byTargetKey = new Map();
-  for (const f of targetFields || []) {
-    const key = pageNameKeyJs(f.title);
-    if (!byTargetKey.has(key)) byTargetKey.set(key, f);
-  }
+  const bySourceTitle = groupByTitleJs(sourceFields);
+  const byTargetTitle = groupByTitleJs(targetFields);
 
   const matchedTitles = [];
   const hierarchyMismatch = [];
+  const duplicateTitleConflicts = [];
   const onlyInSource = [];
 
-  for (const [key, srcField] of bySourceKey) {
-    const tgtField = byTargetKey.get(key);
-    if (!tgtField) { onlyInSource.push(srcField.title); continue; }
+  for (const [key, srcVariants] of bySourceTitle) {
+    const tgtVariants = byTargetTitle.get(key);
+    if (!tgtVariants) { onlyInSource.push(srcVariants[0].title); continue; }
+    if (srcVariants.length > 1 || tgtVariants.length > 1) { duplicateTitleConflicts.push(srcVariants[0].title); continue; }
+    const srcField = srcVariants[0];
+    const tgtField = tgtVariants[0];
     if (Boolean(srcField.isHierarchy) !== Boolean(tgtField.isHierarchy)) { hierarchyMismatch.push(srcField.title); continue; }
     matchedTitles.push(srcField.title);
   }
 
-  const matchedKeys = new Set([...matchedTitles, ...hierarchyMismatch].map(pageNameKeyJs));
-  const onlyInTarget = Array.from(byTargetKey.entries())
-    .filter(([key]) => !matchedKeys.has(key) && !bySourceKey.has(key))
-    .map(([, f]) => f.title);
+  const matchedKeys = new Set([...matchedTitles, ...hierarchyMismatch, ...duplicateTitleConflicts].map(pageNameKeyJs));
+  const onlyInTarget = Array.from(byTargetTitle.entries())
+    .filter(([key]) => !matchedKeys.has(key) && !bySourceTitle.has(key))
+    .map(([, variants]) => variants[0].title);
 
   const identical = onlyInSource.length === 0 && onlyInTarget.length === 0 &&
-    hierarchyMismatch.length === 0 && matchedTitles.length > 0;
+    hierarchyMismatch.length === 0 && duplicateTitleConflicts.length === 0 && matchedTitles.length > 0;
 
-  return { identical, matchedTitles, onlyInSource, onlyInTarget, hierarchyMismatch };
+  return { identical, matchedTitles, onlyInSource, onlyInTarget, hierarchyMismatch, duplicateTitleConflicts };
 }
 
 function findWorkspaceRoot() {
@@ -94,6 +111,19 @@ const DISCOVER_RUNTIME_FILE = path.join(RUNTIME_DIR, 'discover-runtime-config.js
 let mainWindow = null;
 let isRunning = false;
 
+// isRunning (above) only guards ONE runScript() call - but runCrossReportDiscovery
+// (source, then target) and run-setup-and-parity (setup, then parity) each make
+// TWO sequential runScript calls under one IPC invocation. isRunning resets to
+// false between them (see runScript's `close` handler), which briefly re-enables
+// every button in the UI - a real window for a double-click to start a second,
+// genuinely concurrent run that corrupts the same output files. flowBusy guards
+// the WHOLE ipcMain.handle call instead, from before its first runScript call to
+// after its last. Set/checked synchronously with no `await` in between in
+// beginFlow(), so two "simultaneous" IPC invocations can't race past the check -
+// Node's single-threaded event loop runs one handler's synchronous prefix to
+// completion before starting another's.
+let flowBusy = false;
+
 function emitLog(line) {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('runner-log', line);
@@ -104,6 +134,25 @@ function emitState(state) {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('runner-state', state);
   }
+}
+
+function emitBusy(isBusy) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('runner-busy', isBusy);
+  }
+}
+
+/** Returns false (without changing state) if a flow is already in progress. */
+function beginFlow() {
+  if (flowBusy) return false;
+  flowBusy = true;
+  emitBusy(true);
+  return true;
+}
+
+function endFlow() {
+  flowBusy = false;
+  emitBusy(false);
 }
 
 function ensureRuntimeDir() {
@@ -273,15 +322,32 @@ async function runParity(config) {
 
   emitLog('[desktop-runner] Starting parity via npm run parity');
   await runScript('parity', extraEnv, 'parity');
+
+  // Read back the in-page summary the test just wrote (see
+  // report-parity.spec.ts's parity-result.json write, mirroring how
+  // discovered-slicers.json already gets read back below). Unlike
+  // discovery, a MISSING file here is an expected, non-error state - a
+  // source-only run (MODE=source) legitimately produces no comparison, so
+  // nothing to summarize - not a broken run.
+  const resolvedPairName = (config.pairName || 'Cygnus').trim();
+  const resultPath = path.join(WORKSPACE_ROOT, 'playwright-report-parity', resolvedPairName, 'parity-result.json');
+  if (!fs.existsSync(resultPath)) return null;
+  try {
+    return JSON.parse(fs.readFileSync(resultPath, 'utf8'));
+  } catch (e) {
+    emitLog(`[desktop-runner] Could not read parity-result.json (non-fatal): ${e.message}`);
+    return null;
+  }
 }
 
-async function runDiscoverSlicers(pairName, pagesCsv, identity, side) {
+async function runDiscoverSlicers(pairName, pagesCsv, identity, side, skipGlobalCheck) {
   emitLog('[desktop-runner] Starting discovery via npm run discover:slicers');
-  // The desktop app skips the report-level ("global") filter check by
-  // default - our reports always come back empty there, and skipping saves
-  // an embed/probe round trip. Set DISCOVER_SKIP_GLOBAL_CHECK=0 via the
-  // system environment before launching the app to re-enable it.
-  const extraEnv = { DISCOVER_SKIP_GLOBAL_CHECK: process.env.DISCOVER_SKIP_GLOBAL_CHECK === '0' ? '0' : '1' };
+  // Checked by default (safe) - the report-level ("global") filter check is
+  // only skipped when the user explicitly ticks the "skip" checkbox for a
+  // report they've already confirmed never uses it. Defaulting this to
+  // skip-always was a real bug: it silently disabled the check for every
+  // OTHER report pair too, with no indication that it had never run.
+  const extraEnv = { DISCOVER_SKIP_GLOBAL_CHECK: skipGlobalCheck ? '1' : '0' };
 
   if (identity) {
     // Mirrors runParity()'s override mechanism: point comparison-config's
@@ -337,7 +403,7 @@ async function runDiscoverSlicers(pairName, pagesCsv, identity, side) {
  * Both runs use CYGNUS_HIDE_WINDOW=1 so the browser window doesn't steal
  * focus twice in a row.
  */
-async function runCrossReportDiscovery(pairName, sourceIdentity, targetIdentity) {
+async function runCrossReportDiscovery(pairName, sourceIdentity, targetIdentity, skipGlobalCheck) {
   const resolvedPairName = (pairName || 'Cygnus').trim();
   const resultPath = path.join(WORKSPACE_ROOT, 'playwright-report-parity', resolvedPairName, 'discovered-slicers.json');
 
@@ -364,7 +430,7 @@ async function runCrossReportDiscovery(pairName, sourceIdentity, targetIdentity)
     CYGNUS_UI_RUNTIME_CONFIG_PATH: DISCOVER_RUNTIME_FILE,
     DISCOVER_SIDE: 'source',
     DISCOVER_FIRST_MATCH: '1',
-    DISCOVER_SKIP_GLOBAL_CHECK: process.env.DISCOVER_SKIP_GLOBAL_CHECK === '0' ? '0' : '1',
+    DISCOVER_SKIP_GLOBAL_CHECK: skipGlobalCheck ? '1' : '0',
     CYGNUS_HIDE_WINDOW: '1',
   }, 'discover:slicers (source)');
   const sourceResult = readResult('source'); // read BEFORE the target run overwrites this same file
@@ -378,7 +444,7 @@ async function runCrossReportDiscovery(pairName, sourceIdentity, targetIdentity)
     CYGNUS_UI_RUNTIME_OVERRIDE: '1',
     CYGNUS_UI_RUNTIME_CONFIG_PATH: DISCOVER_RUNTIME_FILE,
     DISCOVER_SIDE: 'target',
-    DISCOVER_SKIP_GLOBAL_CHECK: process.env.DISCOVER_SKIP_GLOBAL_CHECK === '0' ? '0' : '1',
+    DISCOVER_SKIP_GLOBAL_CHECK: skipGlobalCheck ? '1' : '0',
     CYGNUS_HIDE_WINDOW: '1',
   };
   if (sourcePageName) {
@@ -398,7 +464,7 @@ async function runCrossReportDiscovery(pairName, sourceIdentity, targetIdentity)
   const matchDetails = matchDiscoveredFieldsJs(sourceFields, targetFields);
   emitLog(matchDetails.identical
     ? '[desktop-runner]   filters match between source and target - one shared picker.'
-    : `[desktop-runner]   filters do NOT match between source and target (${matchDetails.onlyInSource.length} only in source, ${matchDetails.onlyInTarget.length} only in target, ${matchDetails.hierarchyMismatch.length} hierarchy mismatch) - separate pickers needed.`);
+    : `[desktop-runner]   filters do NOT match between source and target (${matchDetails.onlyInSource.length} only in source, ${matchDetails.onlyInTarget.length} only in target, ${matchDetails.hierarchyMismatch.length} hierarchy mismatch, ${matchDetails.duplicateTitleConflicts.length} duplicate-title conflict(s)) - separate pickers needed.`);
 
   return {
     identical: matchDetails.identical,
@@ -431,53 +497,106 @@ ipcMain.handle('get-auth-status', async () => {
   return { hasSession: hasAuthSession() };
 });
 
+const BUSY_ERROR = 'A run is already in progress. Wait for it to finish before starting another.';
+
 ipcMain.handle('run-setup', async () => {
+  if (!beginFlow()) return { ok: false, error: BUSY_ERROR };
   try {
     await runSetup();
     return { ok: true };
   } catch (e) {
     emitLog(`[desktop-runner] Setup error: ${e.message}`);
     return { ok: false, error: e.message };
+  } finally {
+    endFlow();
   }
 });
 
 ipcMain.handle('run-parity', async (_event, config) => {
+  if (!beginFlow()) return { ok: false, error: BUSY_ERROR };
   try {
-    await runParity(config);
-    return { ok: true };
+    const result = await runParity(config);
+    return { ok: true, result };
   } catch (e) {
     emitLog(`[desktop-runner] Parity error: ${e.message}`);
     return { ok: false, error: e.message };
+  } finally {
+    endFlow();
   }
 });
 
-ipcMain.handle('run-discover-cross-report', async (_event, pairName, sourceIdentity, targetIdentity) => {
+ipcMain.handle('run-discover-cross-report', async (_event, pairName, sourceIdentity, targetIdentity, skipGlobalCheck) => {
+  if (!beginFlow()) return { ok: false, error: BUSY_ERROR };
   try {
-    const result = await runCrossReportDiscovery(pairName, sourceIdentity, targetIdentity);
+    const result = await runCrossReportDiscovery(pairName, sourceIdentity, targetIdentity, skipGlobalCheck);
     return { ok: true, result };
   } catch (e) {
     emitLog(`[desktop-runner] Cross-report discover error: ${e.message}`);
     return { ok: false, error: e.message };
+  } finally {
+    endFlow();
   }
 });
 
-ipcMain.handle('run-discover-slicers', async (_event, pairName, pagesCsv, identity, side) => {
+ipcMain.handle('run-discover-slicers', async (_event, pairName, pagesCsv, identity, side, skipGlobalCheck) => {
+  if (!beginFlow()) return { ok: false, error: BUSY_ERROR };
   try {
-    const result = await runDiscoverSlicers(pairName, pagesCsv, identity, side);
+    const result = await runDiscoverSlicers(pairName, pagesCsv, identity, side, skipGlobalCheck);
     return { ok: true, result };
   } catch (e) {
     emitLog(`[desktop-runner] Discover error: ${e.message}`);
     return { ok: false, error: e.message };
+  } finally {
+    endFlow();
   }
 });
 
 ipcMain.handle('run-setup-and-parity', async (_event, config) => {
+  if (!beginFlow()) return { ok: false, error: BUSY_ERROR };
   try {
     await runSetup();
-    await runParity(config);
-    return { ok: true };
+    const result = await runParity(config);
+    return { ok: true, result };
   } catch (e) {
     emitLog(`[desktop-runner] Combined flow error: ${e.message}`);
+    return { ok: false, error: e.message };
+  } finally {
+    endFlow();
+  }
+});
+
+// Confines a renderer-supplied path to WORKSPACE_ROOT/playwright-report-parity
+// before handing it to shell.* below - filePath crosses the renderer/main
+// boundary (it's whatever the UI has stored from a parity-result.json
+// response), so it must never be trusted as-is. The trailing separator on
+// `base` stops a sibling-directory bypass like "...-parity-evil/x".
+const OUTPUT_ROOT = path.join(WORKSPACE_ROOT, 'playwright-report-parity') + path.sep;
+
+function confineToOutputRoot(filePath) {
+  const resolved = path.resolve(String(filePath || ''));
+  if (!resolved.startsWith(OUTPUT_ROOT)) {
+    throw new Error(`Refusing to open a path outside the report output folder: ${filePath}`);
+  }
+  return resolved;
+}
+
+ipcMain.handle('open-output-file', async (_event, filePath) => {
+  try {
+    const resolved = confineToOutputRoot(filePath);
+    const err = await shell.openPath(resolved);
+    if (err) return { ok: false, error: err };
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+
+ipcMain.handle('show-output-in-folder', async (_event, filePath) => {
+  try {
+    const resolved = confineToOutputRoot(filePath);
+    shell.showItemInFolder(resolved);
+    return { ok: true };
+  } catch (e) {
     return { ok: false, error: e.message };
   }
 });

@@ -26,7 +26,7 @@ import {
   type ReportPage,
   type VisualExport,
 } from './harness.helpers';
-import type { WorkbookDiffSummary, VisualBlockDiff } from './excel-compare.helpers';
+import type { WorkbookDiffSummary, VisualBlockDiff, SheetDiffSummary } from './excel-compare.helpers';
 
 // Visual types that carry no tabular data — never written or compared.
 const SKIP_TYPES = new Set(['image', 'shape', 'textbox', 'actionButton']);
@@ -511,6 +511,259 @@ function visualDataMatches(status: VisualBlockDiff['status']): boolean {
   return status === 'identical' || status === 'header-diff' || status === 'duplicate-count';
 }
 
+// ── Severity tiers ───────────────────────────────────────────────────────────
+//
+// A value difference and a header/label rename are not the same kind of
+// problem — a renamed column is expected, cosmetic noise from a migration; a
+// visual with different numbers (or one that vanished entirely) is a real
+// finding. VISUAL_STATUS_LABEL/FILL above already say WHICH of 7 fine-grained
+// statuses a visual has, but reading 7 different labels to work out "is this
+// one bad?" doesn't scale. Severity collapses them to 3 buckets so the sheet
+// can be scanned (or filtered) at a glance, and gives the row itself a light
+// background tint (full-row, not just the Status cell) so a critical row is
+// visually unmistakable even scrolling past it quickly.
+export type Severity = 'safe' | 'review' | 'critical';
+
+const VISUAL_SEVERITY: Record<VisualBlockDiff['status'], Severity> = {
+  'identical':        'safe',
+  'header-diff':      'safe',     // values match — only the label text changed
+  'duplicate-count':  'safe',     // values match — only the copy count changed
+  'ambiguous':        'review',   // couldn't be auto-verified either way
+  'only-in-expected': 'critical', // a visual genuinely vanished
+  'only-in-actual':   'critical', // a visual genuinely appeared
+  'data-diff':        'critical', // same visual, different numbers
+};
+
+const SEVERITY_LABEL: Record<Severity, string> = {
+  safe:     '✅ Safe — cosmetic only',
+  review:   '❓ Needs manual review',
+  critical: '❌ Critical — real difference',
+};
+
+// Pale versions of the status fills, meant for tinting an entire row rather
+// than one bold cell — strong enough to scan down a column of rows, light
+// enough that black text stays readable on top of it.
+const E_PASS_LT:     ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE2F3E1' } };
+const E_INFO_LT:     ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFEAF1FB' } };
+const E_WARN_LT:     ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF1D6' } };
+const E_FAIL_LT:     ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFCE1E1' } };
+
+const SEVERITY_ROW_FILL: Record<Severity, ExcelJS.Fill> = {
+  safe:     E_PASS_LT,
+  review:   E_WARN_LT,
+  critical: E_FAIL_LT,
+};
+const SEVERITY_CELL_FILL: Record<Severity, ExcelJS.Fill> = {
+  safe:     E_PASS,
+  review:   E_WARN,
+  critical: E_FAIL,
+};
+
+// header-diff/duplicate-count share the 'safe' severity but should still tint
+// slightly differently from a truly byte-identical visual, so a reviewer can
+// still tell "renamed" from "untouched" without reading the Status column —
+// this only affects the ROW tint, never the severity bucket itself.
+function rowFillFor(status: VisualBlockDiff['status']): ExcelJS.Fill {
+  if (status === 'header-diff' || status === 'duplicate-count') return E_INFO_LT;
+  return SEVERITY_ROW_FILL[VISUAL_SEVERITY[status]];
+}
+
+// ── Plain-English analysis ────────────────────────────────────────────────────
+//
+// The rest of this workbook answers "what differs, exactly, and where" — this
+// answers the question a reviewer actually asks first: "do I need to worry
+// about this?" It's generated purely from counts already computed elsewhere
+// in this function (no new comparison logic), so it can never disagree with
+// the detailed sheets — it's a summary OF them, not a second opinion.
+
+export interface AnalysisStats {
+  /** Visuals actually inspected in detail (Tier 2) — excludes pages that
+   *  matched byte-for-byte at the fast Tier 1 check, which never get a
+   *  per-visual breakdown because there's nothing to break down. */
+  totalVisuals: number;
+  identicalVisuals: number;
+  /** header-diff + duplicate-count: values match, only cosmetic. */
+  cosmeticOnly: number;
+  /** ambiguous: could not be auto-verified either way. */
+  needsReview: number;
+  /** only-in-expected + only-in-actual + data-diff: a genuine difference. */
+  critical: number;
+  /** Pages that matched byte-for-byte at the fast check (no visual detail). */
+  fastPassPages: number;
+}
+
+export function computeAnalysisStats(diff: WorkbookDiffSummary): AnalysisStats {
+  const stats: AnalysisStats = {
+    totalVisuals: 0, identicalVisuals: 0, cosmeticOnly: 0, needsReview: 0, critical: 0, fastPassPages: 0,
+  };
+  for (const s of diff.sheets) {
+    if (!s.inExpected || !s.inActual) continue; // whole-page-missing handled separately, via sheetsOnlyIn*
+    if (s.visuals.length === 0) {
+      if (s.identical) stats.fastPassPages++;
+      continue;
+    }
+    for (const v of s.visuals) {
+      stats.totalVisuals++;
+      switch (VISUAL_SEVERITY[v.status]) {
+        case 'safe':     if (v.status === 'identical') stats.identicalVisuals++; else stats.cosmeticOnly++; break;
+        case 'review':   stats.needsReview++; break;
+        case 'critical': stats.critical++; break;
+      }
+    }
+  }
+  return stats;
+}
+
+/** Returns 2-4 short sentences, each its own row in the summary. */
+export function buildAnalysisNarrative(
+  diff: WorkbookDiffSummary,
+  stats: AnalysisStats,
+  passed: boolean,
+  caveats: string[],
+): string[] {
+  const lines: string[] = [];
+  const pagesMissing = diff.sheetsOnlyInExpected.length + diff.sheetsOnlyInActual.length;
+
+  if (caveats.length > 0) {
+    lines.push(
+      `⚠ This run is NOT directly comparable — ${caveats.length} caveat(s) affected it (see the Caveat rows below). ` +
+      `Resolve those before trusting the pass/fail verdict.`,
+    );
+  }
+
+  const diffVisuals = stats.totalVisuals - stats.identicalVisuals;
+
+  if (stats.totalVisuals === 0) {
+    lines.push(stats.fastPassPages > 0
+      ? `All ${stats.fastPassPages} compared page(s) matched byte-for-byte — no differences of any kind.`
+      : 'No pages were compared in detail (nothing to analyze).');
+  } else if (diffVisuals === 0) {
+    lines.push(`All ${stats.totalVisuals} visual(s) inspected are identical — no differences of any kind.`);
+  } else {
+    const pctCosmetic = Math.round((stats.cosmeticOnly / diffVisuals) * 100);
+    if (stats.critical === 0 && stats.needsReview === 0) {
+      lines.push(
+        `Good news: every difference found (${stats.cosmeticOnly} of ${diffVisuals}) is cosmetic only — ` +
+        `column/visual labels were renamed during migration, but every underlying VALUE still matches. Nothing here needs action.`,
+      );
+    } else {
+      const parts: string[] = [];
+      if (stats.cosmeticOnly > 0) parts.push(`${stats.cosmeticOnly} cosmetic label rename(s) (${pctCosmetic}% of all differences — values match, safe to ignore)`);
+      if (stats.critical > 0) parts.push(`${stats.critical} critical difference(s) (missing/added visuals or values that genuinely don't match)`);
+      if (stats.needsReview > 0) parts.push(`${stats.needsReview} visual(s) needing a manual look (duplicate titles the tool couldn't auto-match)`);
+      lines.push(`Of ${diffVisuals} visual(s) that differ: ${parts.join('; ')}.`);
+      lines.push(stats.critical > 0
+        ? `Bottom line: ${stats.critical} genuine issue(s) need review before sign-off${stats.cosmeticOnly > 0 ? ` — the other ${stats.cosmeticOnly} are just renamed labels and can be ignored` : ''}.`
+        : `Bottom line: nothing critical, but ${stats.needsReview} visual(s) need a quick manual check (see "❓ Needs manual review" rows on Visual Comparison).`);
+    }
+  }
+
+  if (pagesMissing > 0) {
+    lines.push(`${pagesMissing} entire page(s) exist on only one side of the comparison (see "Pages Only in Source/Target" below) — not counted in the visual stats above.`);
+  }
+
+  return lines;
+}
+
+// ── Lightweight UI summary (for the desktop app, NOT the xlsx) ───────────────
+//
+// A trimmed, JSON-serializable view of a comparison result, meant for the
+// Electron app to render an in-page summary right after a run finishes,
+// instead of the user having to open parity-summary.xlsx just to see
+// pass/fail. Deliberately excludes VisualBlockDiff's sampleOnlyInExpected/
+// sampleOnlyInActual arrays (up to SAMPLE_SIZE=800 rows each, per visual) —
+// those stay exclusive to the xlsx "Differences" sheet. This is a summary
+// OF the xlsx, not a replacement for it; fields are picked explicitly
+// below, never spread, so a future VisualBlockDiff field never leaks a
+// large payload into this JSON by accident.
+
+export interface ParityUiVisual {
+  title: string;
+  type: string;
+  severity: Severity;
+  statusLabel: string;
+  note?: string;
+}
+
+export interface ParityUiPage {
+  name: string;
+  status: 'identical' | 'header-only' | 'different' | 'only-in-source' | 'only-in-target';
+  rowsExpected: number;
+  rowsActual: number;
+  headerDiffCount: number;
+  structuralDiffCount: number;
+  visuals: ParityUiVisual[];
+}
+
+export interface ParityUiSummary {
+  /** Same three-way distinction the xlsx verdict cell shows - a plain
+   *  boolean can't tell "genuine fail" from "not a valid comparison". */
+  verdict: 'pass' | 'fail' | 'not_comparable';
+  passed: boolean;
+  differingSheets: number;
+  caveats: string[];
+  narrative: string[];
+  stats: AnalysisStats;
+  pagesOnlyInSource: string[];
+  pagesOnlyInTarget: string[];
+  pages: ParityUiPage[];
+}
+
+/** Per-page status - mirrors the exact if/else chain used for the "Page
+ *  Comparison" xlsx sheet's Status column, so the two never drift apart. */
+function pageUiStatus(s: SheetDiffSummary): ParityUiPage['status'] {
+  if (s.inExpected && !s.inActual) return 'only-in-source';
+  if (!s.inExpected && s.inActual) return 'only-in-target';
+  if (s.identical) return 'identical';
+  if (s.dataIdentical) return 'header-only';
+  return 'different';
+}
+
+/**
+ * Builds the lightweight UI summary described above. `passed`/`differingSheets`
+ * should be exactly what writeParitySummary() just returned for this same
+ * `diff`, so the two representations of the same run can never disagree.
+ */
+export function summarizeForUi(
+  diff: WorkbookDiffSummary,
+  caveats: string[],
+  passed: boolean,
+  differingSheets: number,
+): ParityUiSummary {
+  const stats = computeAnalysisStats(diff);
+  const narrative = buildAnalysisNarrative(diff, stats, passed, caveats);
+
+  const pages: ParityUiPage[] = diff.sheets
+    .filter(s => s.inExpected && s.inActual) // sheetsOnlyInExpected/Actual already cover the other two cases below
+    .map(s => ({
+      name: s.sheet,
+      status: pageUiStatus(s),
+      rowsExpected: s.rowsExpected,
+      rowsActual: s.rowsActual,
+      headerDiffCount: s.headerDiffCount,
+      structuralDiffCount: s.structuralDiffCount,
+      visuals: s.visuals.map(v => ({
+        title: v.title,
+        type: v.type,
+        severity: VISUAL_SEVERITY[v.status],
+        statusLabel: VISUAL_STATUS_LABEL[v.status],
+        note: v.note,
+      })),
+    }));
+
+  return {
+    verdict: caveats.length > 0 ? 'not_comparable' : (passed ? 'pass' : 'fail'),
+    passed,
+    differingSheets,
+    caveats,
+    narrative,
+    stats,
+    pagesOnlyInSource: diff.sheetsOnlyInExpected,
+    pagesOnlyInTarget: diff.sheetsOnlyInActual,
+    pages,
+  };
+}
+
 /**
  * Writes the migration-parity summary workbook from a comparison result.
  * Returns { passed, differingSheets } for the caller's console verdict.
@@ -544,6 +797,29 @@ export async function writeParitySummary(
   // ── Sheet 1: Summary ──────────────────────────────────────────────────────
   const infoWs = wb.addWorksheet('Parity Summary');
   infoWs.columns = [{ width: 30 }, { width: 60 }];
+
+  // Analysis narrative FIRST — the plain-English "do I need to worry about
+  // this" answer a reviewer wants before any raw counts. Purely derived from
+  // stats computed below; never a second source of truth.
+  const analysisStats = computeAnalysisStats(diff);
+  const analysisLines = buildAnalysisNarrative(diff, analysisStats, passed, caveats);
+  const analysisHeaderRow = infoWs.addRow(['📋 Analysis', '']);
+  infoWs.mergeCells(analysisHeaderRow.number, 1, analysisHeaderRow.number, 2);
+  analysisHeaderRow.getCell(1).fill = E_HDR;
+  analysisHeaderRow.getCell(1).font = { bold: true, size: 13, color: { argb: 'FFFFFFFF' } };
+  analysisHeaderRow.getCell(1).alignment = { vertical: 'middle' };
+  analysisHeaderRow.height = 22;
+  for (const line of analysisLines) {
+    const r = infoWs.addRow([line, '']);
+    infoWs.mergeCells(r.number, 1, r.number, 2);
+    const c = r.getCell(1);
+    c.font = { italic: true };
+    c.alignment = { vertical: 'middle', wrapText: true };
+    c.fill = E_INFO;
+    r.height = 32;
+  }
+  infoWs.addRow(['', '']); // spacer before the raw stats table below
+
   const verdict = caveats.length > 0
     ? `⚠️ NOT COMPARABLE — ${caveats.length} caveat(s) invalidate this run (see Caveat rows below)`
     : passed
@@ -574,15 +850,16 @@ export async function writeParitySummary(
   }
   caveats.forEach((c, i) => rows.push([`⚠ Caveat ${i + 1}`, c]));
   rows.push(['Overall Result', verdict]);
+  let verdictRow: ExcelJS.Row | undefined;
   rows.forEach(([label, value]) => {
     const r = infoWs.addRow([label, value]);
     r.getCell(1).font = { bold: true };
     r.getCell(1).fill = label.startsWith('⚠ Caveat') ? E_WARN : E_INFO;
     r.eachCell(c => { c.border = E_CB; c.alignment = { vertical: 'middle', wrapText: true }; });
+    if (label === 'Overall Result') verdictRow = r;
   });
-  const verdictRow = infoWs.getRow(rows.length);
-  verdictRow.getCell(2).fill = caveats.length > 0 ? E_WARN : (passed ? E_PASS : E_FAIL);
-  verdictRow.getCell(2).font = { bold: true, color: { argb: caveats.length > 0 ? 'FF000000' : 'FFFFFFFF' } };
+  verdictRow!.getCell(2).fill = caveats.length > 0 ? E_WARN : (passed ? E_PASS : E_FAIL);
+  verdictRow!.getCell(2).font = { bold: true, color: { argb: caveats.length > 0 ? 'FF000000' : 'FFFFFFFF' } };
 
   // ── Sheet 2: Page Comparison ──────────────────────────────────────────────
   const cmpWs = wb.addWorksheet('Page Comparison');
@@ -635,6 +912,7 @@ export async function writeParitySummary(
     { header: 'Page (Sheet)',   key: 'sheet',   width: 24 },
     { header: 'Visual Title',   key: 'title',   width: 34 },
     { header: 'Type',           key: 'type',    width: 20 },
+    { header: 'Severity',       key: 'severity',width: 26 },
     { header: 'Status',         key: 'status',  width: 32 },
     { header: 'Copies (Src/Tgt)', key: 'counts', width: 16 },
     { header: 'Rows (Src/Tgt)', key: 'rows',    width: 16 },
@@ -646,15 +924,18 @@ export async function writeParitySummary(
     c.fill = E_HDR; c.font = { color: { argb: 'FFFFFFFF' }, bold: true };
     c.border = E_CB; c.alignment = { horizontal: 'center', vertical: 'middle' };
   });
+  visWs.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: visWs.columns.length } };
 
   let anyVisualRows = false;
   for (const s of diff.sheets) {
     for (const v of s.visuals) {
       anyVisualRows = true;
+      const severity = VISUAL_SEVERITY[v.status];
       const row = visWs.addRow({
         sheet: s.sheet,
         title: v.title,
         type: v.type,
+        severity: SEVERITY_LABEL[severity],
         status: VISUAL_STATUS_LABEL[v.status],
         counts: `${v.countExpected} / ${v.countActual}`,
         rows: `${v.rowsExpected} / ${v.rowsActual}`,
@@ -662,7 +943,17 @@ export async function writeParitySummary(
         hdrAct: v.headerActual.join(' | '),
         note: v.note ?? '',
       });
-      row.eachCell(c => { c.border = E_CB; c.alignment = { vertical: 'middle', wrapText: true }; });
+      // Whole-row tint by severity first (so every cell — including Header
+      // Source/Target, where a value-vs-label difference is actually visible
+      // — carries the signal), then the two callout cells get their bolder,
+      // more saturated fill on top so they still pop within the tinted row.
+      const rowFill = rowFillFor(v.status);
+      row.eachCell(c => { c.border = E_CB; c.alignment = { vertical: 'middle', wrapText: true }; c.fill = rowFill; });
+
+      const sevCell = row.getCell('severity');
+      sevCell.fill = SEVERITY_CELL_FILL[severity];
+      sevCell.font = { bold: true, color: { argb: severity === 'critical' ? 'FFFFFFFF' : 'FF000000' } };
+
       const sc = row.getCell('status');
       const fill = VISUAL_STATUS_FILL[v.status];
       sc.fill = fill;

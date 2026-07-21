@@ -284,6 +284,32 @@
       margin-left: var(--space-2);
     }
     .badge.hierarchy { background: var(--warn-bg); color: var(--warn-ink); }
+    .badge.review { background: var(--warn-bg); color: var(--warn-ink); }
+    .badge.fail { background: #fdeceb; color: var(--danger); }
+    .badge.lg {
+      font-size: 12px;
+      padding: 4px 12px;
+      margin-left: 0;
+    }
+
+    /* ── Parity results (in-page summary, see renderParityResults) ──────── */
+    #parityResults .discover-page + .discover-page { margin-top: var(--space-3); }
+    .parity-verdict {
+      display: flex;
+      align-items: center;
+      gap: var(--space-2);
+      margin-bottom: var(--space-2);
+    }
+    .parity-file-links {
+      display: flex;
+      gap: var(--space-2);
+      flex-wrap: wrap;
+      margin-top: var(--space-2);
+    }
+    .parity-file-links button {
+      font-size: 12px;
+      padding: 5px 10px;
+    }
 
     /* ── Cross-report filter mismatch (split picker) ───────────────────── */
     .mismatch-banner {
@@ -377,6 +403,7 @@
       </div>
       <div class="status" id="status">State: Idle</div>
       <div id="log"></div>
+      <div id="parityResults"></div>
     </div>
 
     <div class="card">
@@ -384,8 +411,17 @@
       <div class="note">
         Discovering is read-only. Values you pick below apply on your next Run Parity.
       </div>
+      <div class="option-toggle">
+        <input type="checkbox" id="discoverSkipGlobalCheck" />
+        <label for="discoverSkipGlobalCheck">
+          Skip report-level filter check (faster — only use once you've confirmed this report doesn't use them).
+        </label>
+      </div>
       <div class="actions">
         <button id="btnDiscover" class="secondary">Discover Filters</button>
+      </div>
+      <div class="note" id="discoverAuthNote" style="display:none; color: var(--danger);">
+        Run Authentication (or Run Auth + Parity) first — no saved login session yet. Discovery can't sign you in itself.
       </div>
       <div id="globalFiltersResult">
         <div class="placeholder">No global filters checked yet.</div>
