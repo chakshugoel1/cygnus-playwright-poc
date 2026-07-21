@@ -448,11 +448,21 @@ async function streamSheetBlocks(
       if (isBlank) return;       // spacer row between visuals
       if (!current) return;      // defensive: content before any marker row
 
-      if (!sawHeaderForCurrent) {
-        current.headers = cells;
-        sawHeaderForCurrent = true;
-      } else {
-        current.rows.push(cells);
+        if (marker) {
+          if (current) blocks.push(current);
+          current = { title: marker[1].trim(), type: marker[2].trim(), headers: [], rows: [] };
+          sawHeaderForCurrent = false;
+          continue;
+        }
+        if (isBlank) continue;       // spacer row between visuals
+        if (!current) continue;      // defensive: content before any marker row
+
+        if (!sawHeaderForCurrent) {
+          current.headers = cells;
+          sawHeaderForCurrent = true;
+        } else {
+          current.rows.push(cells);
+        }
       }
     });
     if (current) blocks.push(current);
