@@ -18,7 +18,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import ExcelJS from 'exceljs';
-import { compareWorkbooks, readWorkbookSheetInfo } from '../helpers/excel-compare.helpers';
+import { compareWorkbooks, readWorkbookSheetInfo, normalizeRow } from '../helpers/excel-compare.helpers';
 import { writeVisualsToSheet, diffPageSets } from '../helpers/report-export.helpers';
 import type { VisualExport } from '../helpers/harness.helpers';
 
@@ -73,6 +73,11 @@ const PAGE_A = 'Dashboard Bewerbungseingänge';
 const PAGE_B = 'Dashboard Absagen';
 const PAGE_C_SRC = 'Vertragsrücklauf - Cluster';
 const PAGE_C_TGT = 'Vertragsrücklauf - cluster';
+// Real production case: the exact same page lost its accent during
+// migration ("Commodité" -> "Commodite") and was reported as two different
+// pages instead of pairing up.
+const PAGE_D_SRC = 'Commodit' + String.fromCharCode(0xe9); // "Commodité"
+const PAGE_D_TGT = 'Commodite';
 
 test.describe('compareWorkbooks on stream-written files', () => {
   test('reads back REAL page names, never Sheet1/Sheet2 defaults', async () => {
@@ -135,6 +140,50 @@ test.describe('compareWorkbooks on stream-written files', () => {
     const diff = await compareWorkbooks(fa, fb);
     expect(diff.sheetsOnlyInExpected).toEqual(['PAGES']);
     expect(diff.dataIdentical).toBe(false);
+  });
+
+  test('pairs sheets whose names differ only by an accent (migration dropped the accent)', async () => {
+    const fa = tmpPath('accent-a.xlsx');
+    const fb = tmpPath('accent-b.xlsx');
+    await writeWorkbook(fa, [
+      { name: PAGE_D_SRC, visuals: [fakeVisual('KPI', [['a', '1']])] },
+    ]);
+    await writeWorkbook(fb, [
+      { name: PAGE_D_TGT, visuals: [fakeVisual('KPI', [['a', '1']])] },
+    ]);
+
+    const diff = await compareWorkbooks(fa, fb);
+    expect(diff.sheetsOnlyInExpected).toEqual([]);
+    expect(diff.sheetsOnlyInActual).toEqual([]);
+    expect(diff.sheets).toHaveLength(1);
+    expect(diff.dataIdentical).toBe(true);
+  });
+});
+
+test.describe('normalizeRow', () => {
+  // Regression test for a production crash: ExcelJS's row.values can be a
+  // SPARSE array (a row with no cell at all in some column leaves a real
+  // hole, not an explicit undefined). Array.prototype.map skips holes, so
+  // a naive `.slice(1).map(normalizeCell)` silently let a hole through as
+  // `undefined` instead of '' - crashing the first caller that assumed
+  // every cell was always a string (`cells[0].match(...)` in
+  // streamSheetBlocks, on a 24k-row real table).
+  test('a hole in a sparse row.values becomes "", never undefined', () => {
+    const sparse: unknown[] = [];
+    sparse[0] = undefined; // the always-unused 0-index placeholder
+    sparse[2] = 'present'; // column B has a value; column A (index 1) is a genuine hole
+    expect(1 in sparse).toBe(false); // confirms this really is a hole, not an explicit undefined
+
+    const fakeRow = { values: sparse } as unknown as ExcelJS.Row;
+    const cells = normalizeRow(fakeRow);
+
+    expect(cells).toEqual(['', 'present']);
+    expect(cells[0]).not.toBeUndefined();
+  });
+
+  test('a normal, fully-populated row is unaffected', () => {
+    const fakeRow = { values: [undefined, 'a', 'b', 'c'] } as unknown as ExcelJS.Row;
+    expect(normalizeRow(fakeRow)).toEqual(['a', 'b', 'c']);
   });
 });
 
