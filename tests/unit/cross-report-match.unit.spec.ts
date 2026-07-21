@@ -35,6 +35,15 @@ test.describe('pageNameKey', () => {
     expect(pageNameKey('Page 1')).not.toBe(pageNameKey('Page 2'));
     expect(pageNameKey('Absagen')).not.toBe(pageNameKey('Absagegründe'));
   });
+
+  test('strips accents - a page that lost its accent during migration still matches (real production case)', () => {
+    const withAccent = 'Commodit' + String.fromCharCode(0xe9); // "Commodité"
+    const withoutAccent = 'Commodite';
+    expect(pageNameKey(withAccent)).toBe(pageNameKey(withoutAccent));
+    // and combined with the other normalization rules, not just in isolation
+    expect(pageNameKey('  ' + withAccent + '  ')).toBe(pageNameKey(withoutAccent));
+    expect(pageNameKey(withAccent.toUpperCase())).toBe(pageNameKey(withoutAccent));
+  });
 });
 
 // ── matchDiscoveredFields ──────────────────────────────────────────────────────
