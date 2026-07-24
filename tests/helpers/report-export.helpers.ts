@@ -63,14 +63,26 @@ function toExcelSafeSheetBase(name: string): string {
   return cleaned || 'Sheet';
 }
 
+/**
+ * Truncates by Unicode CODE POINT, not raw string index. Plain .slice()
+ * indexes by UTF-16 code unit - fine for the BMP (covers Latin, accented
+ * Latin, Cyrillic, most CJK) but a page name containing an emoji or other
+ * astral-plane character (a surrogate pair, 2 code units) could get cut
+ * exactly between the two halves of the pair, producing a malformed,
+ * unpaired-surrogate string.
+ */
+export function truncateSafe(text: string, maxLen: number): string {
+  return Array.from(text).slice(0, maxLen).join('');
+}
+
 function toUniqueSheetName(name: string, usedNames: Set<string>): string {
   const base = toExcelSafeSheetBase(name);
-  let candidate = base.slice(0, EXCEL_MAX_SHEET_NAME);
+  let candidate = truncateSafe(base, EXCEL_MAX_SHEET_NAME);
   let counter = 2;
   while (usedNames.has(candidate.toLowerCase())) {
     const suffix = `_${counter}`;
     const maxBaseLen = EXCEL_MAX_SHEET_NAME - suffix.length;
-    candidate = `${base.slice(0, Math.max(1, maxBaseLen))}${suffix}`;
+    candidate = `${truncateSafe(base, Math.max(1, maxBaseLen))}${suffix}`;
     counter += 1;
   }
   usedNames.add(candidate.toLowerCase());
@@ -841,7 +853,11 @@ export async function writeParitySummary(
   const rows: [string, string][] = [
     ['Pair',                meta.pairName],
     ['Run Mode',            meta.mode],
-    ['Run Time',            new Date().toLocaleString()],
+    // Pinned locale + named month: a bare .toLocaleString() renders in
+    // whichever OS locale ran the script (dd/mm vs mm/dd is genuinely
+    // ambiguous across countries) - this way the summary reads the same
+    // regardless of who generated it or where.
+    ['Run Time',            new Date().toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'medium' })],
     [`Source (${meta.sourceLabel})`, meta.sourceReportId],
     [`Target (${meta.targetLabel})`, meta.targetReportId],
     ['Expected File',       meta.expectedFile],
