@@ -54,15 +54,22 @@ function toExcelSafeSheetBase(name: string): string {
   return cleaned || 'Sheet';
 }
 
+// Truncates by Unicode CODE POINT, not raw string index - see the same
+// helper in report-export.helpers.ts for why plain .slice() risks splitting
+// a surrogate pair (emoji, other astral-plane characters) in half.
+function truncateSafe(text: string, maxLen: number): string {
+  return Array.from(text).slice(0, maxLen).join('');
+}
+
 function toUniqueSheetName(name: string, usedNames: Set<string>): string {
   const base = toExcelSafeSheetBase(name);
-  let candidate = base.slice(0, EXCEL_MAX_SHEET_NAME);
+  let candidate = truncateSafe(base, EXCEL_MAX_SHEET_NAME);
   let counter = 2;
 
   while (usedNames.has(candidate.toLowerCase())) {
     const suffix = `_${counter}`;
     const maxBaseLen = EXCEL_MAX_SHEET_NAME - suffix.length;
-    candidate = `${base.slice(0, Math.max(1, maxBaseLen))}${suffix}`;
+    candidate = `${truncateSafe(base, Math.max(1, maxBaseLen))}${suffix}`;
     counter += 1;
   }
 
@@ -404,7 +411,10 @@ test('Cygnus Main Run — Power BI Harness visual.exportData()', async ({ page }
     ? '⚠️ No baseline — created this run'
     : diff.identical ? '✅ PASSED — exact match' : `❌ FAILED — ${diffSheetCount} sheet(s) differ`;
   const infoData: [string, string | number][] = [
-    ['Run Time',          new Date(report.runAt).toLocaleString()],
+    // Pinned locale + named month - see report-export.helpers.ts's same fix
+    // for why a bare .toLocaleString() (OS-locale-dependent, dd/mm vs mm/dd
+    // is genuinely ambiguous) isn't used here.
+    ['Run Time',          new Date(report.runAt).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'medium' })],
     ['Embed OK',          report.embedOk   ? '✅ Yes' : '❌ No'],
     ['Token Found',       report.tokenFound ? '✅ Yes' : '❌ No'],
     ['Tabs Processed',    report.pageResults.length],

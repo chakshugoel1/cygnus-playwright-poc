@@ -19,7 +19,7 @@ import * as os from 'os';
 import * as path from 'path';
 import ExcelJS from 'exceljs';
 import { compareWorkbooks, readWorkbookSheetInfo, normalizeRow } from '../helpers/excel-compare.helpers';
-import { writeVisualsToSheet, diffPageSets } from '../helpers/report-export.helpers';
+import { writeVisualsToSheet, diffPageSets, truncateSafe } from '../helpers/report-export.helpers';
 import type { VisualExport } from '../helpers/harness.helpers';
 
 const tmpFiles: string[] = [];
@@ -203,5 +203,32 @@ test.describe('diffPageSets', () => {
     expect(d.inBoth).toEqual(['DU Head']);
     expect(d.onlyInSource).toEqual([]);
     expect(d.onlyInTarget).toEqual([]);
+  });
+});
+
+test.describe('truncateSafe', () => {
+  // Regression guard for Excel's 31-char sheet-name limit: a page name
+  // containing an emoji or other astral-plane character is a surrogate
+  // PAIR (2 UTF-16 code units for 1 visible character). Plain .slice()
+  // indexes by code unit and could cut exactly between the two halves,
+  // producing a malformed, unpaired-surrogate string.
+  test('never splits a surrogate pair (emoji) in half', () => {
+    const emoji = String.fromCodePoint(0x1f600); // one grinning-face emoji, a real surrogate pair
+    const name = 'Dashboard ' + emoji + emoji + emoji + ' Overview'; // well past 31 chars
+    const truncated = truncateSafe(name, 12);
+
+    // Every code point in the result round-trips through fromCodePoint - if
+    // a surrogate were split, Array.from would already have thrown this off
+    // by producing a lone (unpaired) surrogate character instead.
+    for (const ch of truncated) {
+      const cp = ch.codePointAt(0)!;
+      expect(String.fromCodePoint(cp)).toBe(ch);
+    }
+    expect(Array.from(truncated).length).toBeLessThanOrEqual(12);
+  });
+
+  test('behaves like a normal length-limited truncation for plain ASCII/Latin text', () => {
+    expect(truncateSafe('Dashboard Overview', 9)).toBe('Dashboard');
+    expect(truncateSafe('Bewerbungseingänge', 100)).toBe('Bewerbungseingänge'); // shorter than max: unchanged
   });
 });

@@ -310,11 +310,18 @@ function normalizeNumericDrift(text: string): string {
 /**
  * Canonical form used for equality/hash checks only.
  * When lenient mode is on, case and common separator differences are ignored.
+ *
+ * Deliberately .toLowerCase(), not .toLocaleLowerCase(): the latter follows
+ * the RUNNING MACHINE's default locale, which a pass/fail verdict must
+ * never depend on - the same two reports must compare identically whether
+ * this runs from a machine set to French, Turkish, or anything else (the
+ * Turkish "I" is the textbook case where locale-aware casing diverges from
+ * every other locale).
  */
 function canonicalizeForCompare(text: string): string {
   if (!LENIENT_TEXT_COMPARE) return text;
   return text
-    .toLocaleLowerCase()
+    .toLowerCase()
     .replace(/[_-]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
