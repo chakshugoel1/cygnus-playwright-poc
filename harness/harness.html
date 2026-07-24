@@ -80,6 +80,18 @@
             navContentPaneEnabled: false,
             filterPaneEnabled:     false,
             background:            1,   // Transparent
+            // Pinned regardless of the signed-in user's own account/tenant
+            // locale - this tool reads data back via exportData() (a CSV
+            // string this codebase parses with a hardcoded comma field
+            // separator) and writes its own Excel output with its own
+            // formatting, so nothing depends on the LIVE embed rendering in
+            // the viewer's locale. Without this, a user whose account
+            // defaults to a comma-decimal locale (French among many others)
+            // could get semicolon-delimited, comma-decimal CSV back from
+            // exportData(), which the parser would misread. Pinning makes
+            // every run - regardless of who runs it or where - produce the
+            // same, parseable export format.
+            localeSettings: { language: 'en-US', formatLocale: 'en-US' },
           }
         };
 
