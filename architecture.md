@@ -10,58 +10,48 @@ twin show the same numbers — and exactly which technology owns each step.
 
 ## End-to-end flow
 
-```mermaid
-flowchart TD
-    subgraph SHELL["DESKTOP SHELL · Electron"]
-        UI["Renderer UI<br/>index.html / app.js<br/>credentials · run · results"]
-        IPC["main.js IPC<br/>spawn · read JSON · open files"]
-    end
-
-    subgraph PROC["TEST PROCESS · Node.js"]
-        PW["Playwright runner<br/>report-parity.spec.ts"]
-        NODE["Node REST helpers<br/>pbi-api.helpers.ts"]
-        CMP["Comparison engine<br/>excel-compare + ExcelJS"]
-    end
-
-    subgraph BROWSER["CHROMIUM · headed browser"]
-        HARN["harness.html<br/>Power BI embed SDK"]
-        IFRAME["Report iframe<br/>visual.exportData → CSV"]
-    end
-
-    PBI["Power BI cloud<br/>REST APIs · WABI cluster"]
-
-    subgraph OUT["OUTPUT FILES"]
-        XLSX["expected.xlsx<br/>actual.xlsx"]
-        RESULT["parity-summary.xlsx<br/>parity-result.json"]
-    end
-
-    UI <--> IPC
-    IPC -->|"spawns npx playwright test"| PW
-    PW --- NODE
-    PW --- CMP
-    NODE -->|"HTTPS: token · metadata · cluster · DAX field check"| PBI
-    PW -->|"page.route / page.evaluate drives the browser"| HARN
-    HARN --> IFRAME
-    IFRAME -->|"CSV rows per visual"| PW
-    PW -->|"writes via ExcelJS"| XLSX
-    CMP -->|"reads back + diffs"| XLSX
-    CMP --> RESULT
-    RESULT -->|"read back into UI"| IPC
-
-    classDef shell fill:#eceff4,stroke:#5a6b82,color:#2c3849;
-    classDef api fill:#ebedfb,stroke:#4f5bd5,color:#2b2f6b;
-    classDef auto fill:#e4f5f2,stroke:#0d8f81,color:#0a4b44;
-    classDef data fill:#f7ecdc,stroke:#b06a12,color:#6b4109;
-    classDef cloud fill:#ffffff,stroke:#8aa0b6,color:#16202b;
-
-    class UI,IPC shell;
-    class PW,HARN,IFRAME auto;
-    class NODE api;
-    class CMP,XLSX,RESULT data;
-    class PBI cloud;
+```text
+┌────────────────────────────────────────────────────────────────────┐
+│                      Desktop Window  (Electron)                      │
+│                Renderer UI  —  index.html / app.js                   │
+│          Enter report identity  •  Run Parity  •  View results       │
+└────────────────────────────────────────────────────────────────────┘
+                                  │
+                                  │  preload bridge  (contextBridge / IPC)
+                                  ▽
+┌────────────────────────────────────────────────────────────────────┐
+│                      Desktop Shell  —  main.js                       │
+│      Spawns the test process  •  Streams the run log to the window   │
+│      Reads parity-result.json back  •  Opens the output files        │
+└────────────────────────────────────────────────────────────────────┘
+                                  │
+                                  │  spawn:  npx playwright test
+                                  ▽
+┌────────────────────────────────────────────────────────────────────┐
+│                  Test Process  (Node.js + Playwright)                │
+│    • report-parity.spec.ts     run orchestration                     │
+│    • harness.helpers.ts        drives the browser, extracts data     │
+│    • pbi-api.helpers.ts        Power BI / Azure AD REST calls        │
+│    • excel-compare + ExcelJS   write · read-back · diff              │
+└────────────────────────────────────────────────────────────────────┘
+          │                        │                         │
+          │ page.route /           │ HTTPS + Bearer          │ ExcelJS
+          │ page.evaluate          │ token · metadata ·      │ stream +
+          │ (drives browser)       │ cluster · DAX check     │ read-back
+          ▽                        ▽                         ▽
+┌────────────────────┐  ┌────────────────────┐  ┌────────────────────┐
+│  Chromium (headed) │  │   Power BI Cloud   │  │    Output Files    │
+│                    │  │                    │  │                    │
+│ • harness.html     │  │ • REST APIs        │  │ • expected.xlsx    │
+│ • Embed SDK        │  │ • WABI cluster     │  │ • actual.xlsx      │
+│ • report iframe    │  │ • Azure AD token   │  │ • parity-          │
+│ • visual.export    │  │ • RLS identity /   │  │   summary.xlsx     │
+│   Data()  →  CSV   │  │   DynamicRoles     │  │ • parity-          │
+│                    │  │                    │  │   result.json      │
+└────────────────────┘  └────────────────────┘  └────────────────────┘
 ```
 
-**Layer legend:** &nbsp; ⬜ Desktop shell &nbsp;·&nbsp; 🟦 Node REST layer &nbsp;·&nbsp; 🟩 Playwright & browser &nbsp;·&nbsp; 🟧 Excel & comparison
+**Layers:** &nbsp; Desktop shell (Electron) &nbsp;→&nbsp; Node + Playwright test process &nbsp;→&nbsp; fans out to the live browser, the Power BI cloud, and the output files.
 
 ---
 
