@@ -8,6 +8,7 @@
     "start": "electron .",
     "launch": "cmd /c \"launch-desktop.bat\"",
     "make-shortcut": "powershell -NoProfile -ExecutionPolicy Bypass -File CreateDesktopShortcut.ps1",
+    "make-icon": "python assets/make-icon.py",
     "dist": "electron-builder --win portable",
     "pack": "electron-builder --dir"
   },
@@ -23,13 +24,15 @@
       "main.js",
       "preload.js",
       "renderer/**/*",
+      "assets/cygnus.ico",
       "package.json"
     ],
     "portable": {
       "artifactName": "Cygnus Desktop Runner-${version}-portable.${ext}"
     },
     "win": {
-      "target": ["portable"]
+      "target": ["portable"],
+      "icon": "assets/cygnus.ico"
     }
   }
 }

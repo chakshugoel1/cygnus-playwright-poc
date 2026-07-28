@@ -483,6 +483,10 @@ function createWindow() {
     width: 1200,
     height: 860,
     backgroundColor: '#f7f9fc',
+    // Single source of truth for the app icon — the same assets/cygnus.ico the
+    // desktop shortcut and the packaged .exe use. Replace that one file (or
+    // regenerate it with `npm run make-icon`) to change the icon everywhere.
+    icon: path.join(__dirname, 'assets', 'cygnus.ico'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
