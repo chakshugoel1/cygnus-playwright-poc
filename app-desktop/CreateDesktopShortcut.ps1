@@ -12,6 +12,9 @@ $shortcut.Arguments = "/c `"$targetPath`""
 $shortcut.WorkingDirectory = $scriptDir
 $shortcut.WindowStyle = 1
 $shortcut.Description = 'Launch Cygnus Desktop Runner'
+# Custom app icon (falls back to the default icon if the file is missing).
+$iconPath = Join-Path $scriptDir 'assets\cygnus.ico'
+if (Test-Path -LiteralPath $iconPath) { $shortcut.IconLocation = "$iconPath,0" }
 $shortcut.Save()
 
 Write-Host "Shortcut created: $shortcutPath"
