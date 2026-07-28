@@ -172,6 +172,10 @@ if (-not $isVerify) {
     $shortcut.TargetPath = $launchBat
     $shortcut.WorkingDirectory = Split-Path -Parent $launchBat
     $shortcut.Description = 'Power BI Report Validator'
+    # Custom app icon (falls back to the default .bat icon if the file is missing,
+    # so a stripped-down checkout never breaks shortcut creation).
+    $iconPath = Join-Path $repoRoot 'app-desktop\assets\cygnus.ico'
+    if (Test-Path -LiteralPath $iconPath) { $shortcut.IconLocation = "$iconPath,0" }
     $shortcut.Save()
 
     Write-Ok "Shortcut created: $shortcutPath"
