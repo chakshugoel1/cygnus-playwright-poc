@@ -10,7 +10,7 @@ mode** to **Direct Lake** still shows the same data.
 
 ### One file, double-click (new machine, easiest)
 
-Share **`bootstrap.cmd`** (email it, Teams/Slack it, drop it on a shared
+Share **`Installer.cmd`** (email it, Teams/Slack it, drop it on a shared
 drive — it's a single standalone file, the rest of the repo doesn't need to
 be there yet). On the new machine, double-click it.
 
@@ -30,7 +30,7 @@ you're ready (see "Desktop GUI" below). The window stays open at the end and
 tells you exactly which shortcut to double-click next.
 
 If something fails partway, fix the reported issue and double-click
-`bootstrap.cmd` again — steps already completed are skipped.
+`Installer.cmd` again — steps already completed are skipped.
 
 ### One link / bootstrap command (alternative — if you'd rather paste a command)
 
@@ -41,7 +41,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "$u='https://raw.githubus
 ```
 
 If your org blocks `Invoke-WebRequest`, copy `bootstrap-install.ps1` (or
-`bootstrap.cmd`, which needs no arguments) to the new machine and run it
+`Installer.cmd`, which needs no arguments) to the new machine and run it
 directly.
 
 > **First-run security prompt:** since both files are downloaded from the
