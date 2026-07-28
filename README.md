@@ -4,6 +4,9 @@ Playwright automation for the Cygnus Power BI dashboard — exports report data 
 regression testing, and validates that a report migrated from Power BI **Import
 mode** to **Direct Lake** still shows the same data.
 
+> **New to the app?** See **[HOW-TO-USE.md](HOW-TO-USE.md)** for a first-time
+> walkthrough: Run Authentication → Discover Filters → Run Parity.
+
 ---
 
 ## 1. First-Time Setup Guide
